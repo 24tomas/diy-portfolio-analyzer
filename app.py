@@ -1521,46 +1521,66 @@ with tab_opt:
             "`requirements.txt`, redeploy, and check build logs for installation errors."
         )
     else:
-        try:
-            from pypfopt import expected_returns, black_litterman, efficient_frontier
-            from pypfopt.efficient_frontier import EfficientFrontier
+        if len(valid_tickers) < 2:
+            st.info("Optimization needs at least 2 assets with valid price history.")
+        else:
+            asset_prices = prices[valid_tickers].copy()
+            asset_returns = asset_prices.pct_change().dropna()
+
+            # Reuse covariance from Risk tab, fallback to local estimate.
+            try:
+                cov_for_opt = cov_matrix.loc[valid_tickers, valid_tickers].copy()
+            except Exception:
+                if HAS_RISK_MODELS:
+                    try:
+                        cov_for_opt = risk_models.CovarianceShrinkage(asset_prices).ledoit_wolf()
+                    except Exception:
+                        cov_for_opt = asset_returns.cov() * 252
+                else:
+                    cov_for_opt = asset_returns.cov() * 252
+            cov_for_opt = cov_for_opt.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            cov_for_opt = 0.5 * (cov_for_opt + cov_for_opt.T)
+
+            def _zero_weights() -> pd.Series:
+                return pd.Series(0.0, index=valid_tickers, dtype=float)
+
+            def _normalize_weights(w: pd.Series) -> pd.Series:
+                w = w.reindex(valid_tickers).fillna(0.0).astype(float)
+                s = float(w.sum())
+                return (w / s) if s > 0 else w
+
+            warn_msgs = []
+            exp_ret = None
+            EfficientFrontier = None
+            EfficientCVaR = None
+            HRPOpt = None
+            black_litterman = None
+
+            # Explicit imports requested + graceful failure handling
+            try:
+                from pypfopt import expected_returns
+                exp_ret = expected_returns.mean_historical_return(asset_prices, frequency=252)
+            except Exception as e:
+                warn_msgs.append(f"Expected return model unavailable; using 0.0 weights where required. ({e})")
+
+            try:
+                from pypfopt.efficient_frontier import EfficientFrontier, EfficientCVaR
+            except Exception as e:
+                warn_msgs.append(f"EfficientFrontier/EfficientCVaR import failed. ({e})")
+
             try:
                 from pypfopt.hierarchical_portfolio import HRPOpt
-            except Exception:
-                HRPOpt = None
+            except Exception as e:
+                warn_msgs.append(f"HRPOpt import failed; falling back to inverse-vol where possible. ({e})")
 
-            if len(valid_tickers) < 2:
-                st.info("Optimization needs at least 2 assets with valid price history.")
-            else:
-                asset_prices = prices[valid_tickers].copy()
-                asset_returns = asset_prices.pct_change().dropna()
+            try:
+                from pypfopt import black_litterman
+            except Exception as e:
+                warn_msgs.append(f"black_litterman import failed. ({e})")
 
-                # Historical annualized expected returns (mean return model)
-                exp_ret = expected_returns.mean_historical_return(asset_prices, frequency=252)
-
-                # Reuse covariance from Risk tab, fallback to local estimate.
-                try:
-                    cov_for_opt = cov_matrix.loc[valid_tickers, valid_tickers].copy()
-                except Exception:
-                    if HAS_RISK_MODELS:
-                        cov_for_opt = risk_models.CovarianceShrinkage(asset_prices).ledoit_wolf()
-                    else:
-                        cov_for_opt = asset_returns.cov() * 252
-                cov_for_opt = cov_for_opt.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-                cov_for_opt = 0.5 * (cov_for_opt + cov_for_opt.T)
-
-                def _zero_weights() -> pd.Series:
-                    return pd.Series(0.0, index=valid_tickers, dtype=float)
-
-                def _normalize_weights(w: pd.Series) -> pd.Series:
-                    w = w.reindex(valid_tickers).fillna(0.0).astype(float)
-                    s = float(w.sum())
-                    return (w / s) if s > 0 else w
-
-                warn_msgs = []
-
-                # 1) Max Sharpe (Mean-Variance)
-                max_sharpe_w = _zero_weights()
+            # 1) Max Sharpe (Mean-Variance)
+            max_sharpe_w = _zero_weights()
+            if EfficientFrontier is not None and exp_ret is not None:
                 try:
                     ef = EfficientFrontier(exp_ret, cov_for_opt)
                     ef.max_sharpe(risk_free_rate=rf)
@@ -1568,112 +1588,118 @@ with tab_opt:
                 except Exception as e:
                     warn_msgs.append(f"Max Sharpe failed; using 0.0 weights. ({e})")
 
-                # 2) Risk Parity / Equal Risk
-                risk_parity_w = _zero_weights()
+            # 2) Risk Parity / Equal Risk
+            risk_parity_w = _zero_weights()
+            if HRPOpt is not None:
                 try:
-                    if HRPOpt is None:
-                        raise RuntimeError("HRPOpt unavailable")
                     hrp = HRPOpt(returns=asset_returns)
                     risk_parity_w = pd.Series(hrp.optimize(), dtype=float)
                 except Exception as e:
-                    try:
-                        vol = np.sqrt(np.diag(cov_for_opt.values))
-                        inv_vol = np.where(vol > 0, 1.0 / vol, 0.0)
-                        if inv_vol.sum() == 0:
-                            raise RuntimeError("Inverse-vol fallback has zero denominator.")
-                        risk_parity_w = pd.Series(inv_vol / inv_vol.sum(), index=valid_tickers, dtype=float)
-                        warn_msgs.append(f"HRP solver failed; used inverse-vol fallback. ({e})")
-                    except Exception as ee:
-                        warn_msgs.append(f"Risk Parity failed; using 0.0 weights. ({ee})")
-
-                # 3) Black-Litterman (Market-Implied Prior)
-                bl_w = _zero_weights()
+                    warn_msgs.append(f"HRPOpt solver failed; trying inverse-vol fallback. ({e})")
+            if float(risk_parity_w.sum()) == 0.0:
                 try:
-                    # Market-implied risk aversion from benchmark daily returns.
+                    vol = np.sqrt(np.diag(cov_for_opt.values))
+                    inv_vol = np.where(vol > 0, 1.0 / vol, 0.0)
+                    if inv_vol.sum() > 0:
+                        risk_parity_w = pd.Series(inv_vol / inv_vol.sum(), index=valid_tickers, dtype=float)
+                    else:
+                        warn_msgs.append("Risk Parity fallback failed; using 0.0 weights.")
+                except Exception as e:
+                    warn_msgs.append(f"Risk Parity fallback failed; using 0.0 weights. ({e})")
+
+            # 3) Black-Litterman stable version:
+            # Use market-implied prior returns directly, then optimize with EfficientFrontier.
+            bl_w = _zero_weights()
+            if black_litterman is not None and EfficientFrontier is not None:
+                try:
                     bench_mu_ann = float(bench_ret.mean() * 252)
                     bench_var_ann = float(bench_ret.var() * 252)
-                    if bench_var_ann <= 1e-12:
-                        delta = 2.5
-                    else:
-                        delta = max((bench_mu_ann - rf) / bench_var_ann, 1e-6)
-
-                    # Stable equal-cap prior in lieu of live market caps.
+                    delta = 2.5 if bench_var_ann <= 1e-12 else max((bench_mu_ann - rf) / bench_var_ann, 1e-6)
                     eq_mcaps = pd.Series(1.0, index=valid_tickers)
-                    pi_bl = black_litterman.market_implied_prior_returns(
+                    implied_rets = black_litterman.market_implied_prior_returns(
                         eq_mcaps, delta, cov_for_opt, risk_free_rate=rf
                     )
-
-                    bl = black_litterman.BlackLittermanModel(cov_for_opt, pi=pi_bl, tau=0.05)
-                    bl_rets = bl.bl_returns()
-                    bl_cov = bl.bl_cov()
-
-                    ef_bl = EfficientFrontier(bl_rets, bl_cov)
+                    ef_bl = EfficientFrontier(implied_rets, cov_for_opt)
                     ef_bl.max_sharpe(risk_free_rate=rf)
                     bl_w = pd.Series(ef_bl.clean_weights(), dtype=float)
                 except Exception as e:
-                    warn_msgs.append(f"Black-Litterman failed; using 0.0 weights. ({e})")
+                    warn_msgs.append(f"Black-Litterman implied-return portfolio failed; using 0.0 weights. ({e})")
 
-                # 4) Minimum CVaR (95% confidence)
-                min_cvar_w = _zero_weights()
+            # 4) Minimum CVaR (95% confidence)
+            # Requires cvxpy backend; fail gracefully if unavailable.
+            min_cvar_w = _zero_weights()
+            if EfficientCVaR is not None and exp_ret is not None:
                 try:
-                    ecvar = efficient_frontier.EfficientCVaR(exp_ret, asset_returns, beta=0.95)
+                    ecvar = EfficientCVaR(exp_ret, asset_returns)
                     ecvar.min_cvar()
                     min_cvar_w = pd.Series(ecvar.clean_weights(), dtype=float)
                 except Exception as e:
-                    warn_msgs.append(f"Min CVaR failed; using 0.0 weights. ({e})")
+                    warn_msgs.append(f"Min CVaR failed (likely solver/cvxpy issue); using 0.0 weights. ({e})")
 
-                current_w = wt.reindex(valid_tickers).fillna(0.0).astype(float)
-                max_sharpe_w = _normalize_weights(max_sharpe_w)
-                risk_parity_w = _normalize_weights(risk_parity_w)
-                bl_w = _normalize_weights(bl_w)
-                min_cvar_w = _normalize_weights(min_cvar_w)
+            current_w = wt.reindex(valid_tickers).fillna(0.0).astype(float)
+            max_sharpe_w = _normalize_weights(max_sharpe_w)
+            risk_parity_w = _normalize_weights(risk_parity_w)
+            bl_w = _normalize_weights(bl_w)
+            min_cvar_w = _normalize_weights(min_cvar_w)
 
-                opt_df = pd.DataFrame({
-                    "Ticker": valid_tickers,
-                    "Current Weight": current_w.values,
-                    "Max Sharpe": max_sharpe_w.values,
-                    "Risk Parity": risk_parity_w.values,
-                    "Black-Litterman": bl_w.values,
-                    "Min CVaR": min_cvar_w.values,
-                }).sort_values("Current Weight", ascending=False)
+            opt_df = pd.DataFrame({
+                "Ticker": valid_tickers,
+                "Current Weight": current_w.values,
+                "Max Sharpe": max_sharpe_w.values,
+                "Risk Parity": risk_parity_w.values,
+                "Black-Litterman": bl_w.values,
+                "Min CVaR": min_cvar_w.values,
+            }).sort_values("Current Weight", ascending=False)
 
-                for msg in warn_msgs:
-                    st.caption(f"Warning: {msg}")
+            for msg in warn_msgs:
+                st.caption(f"Warning: {msg}")
 
-                fig_opt = go.Figure()
-                fig_opt.add_trace(go.Bar(
-                    x=opt_df["Ticker"], y=opt_df["Current Weight"], name="Current Weight",
-                    marker_color="#636EFA",
-                ))
-                fig_opt.add_trace(go.Bar(
-                    x=opt_df["Ticker"], y=opt_df["Max Sharpe"], name="Max Sharpe (Mean-Variance)",
-                    marker_color="#EF553B",
-                ))
-                fig_opt.add_trace(go.Bar(
-                    x=opt_df["Ticker"], y=opt_df["Risk Parity"], name="Risk Parity (Equal Risk)",
-                    marker_color="#00CC96",
-                ))
-                fig_opt.add_trace(go.Bar(
-                    x=opt_df["Ticker"], y=opt_df["Black-Litterman"], name="Black-Litterman (Market Implied)",
-                    marker_color="#AB63FA",
-                ))
-                fig_opt.add_trace(go.Bar(
-                    x=opt_df["Ticker"], y=opt_df["Min CVaR"], name="Min CVaR (Tail Risk Optimized)",
-                    marker_color="#FFA15A",
-                ))
-                fig_opt.update_layout(
-                    barmode="group",
-                    xaxis_title="Ticker",
-                    yaxis_title="Weight",
-                    yaxis_tickformat=".0%",
-                    legend=dict(orientation="h", y=1.02, x=0),
-                    margin=dict(l=40, r=20, t=30, b=40),
-                    height=max(400, len(opt_df) * 30),
-                )
-                st.plotly_chart(fig_opt, width='stretch')
+            fig_opt = go.Figure()
+            fig_opt.add_trace(go.Bar(
+                x=opt_df["Ticker"], y=opt_df["Current Weight"], name="Current Weight",
+                marker_color="#636EFA",
+            ))
+            fig_opt.add_trace(go.Bar(
+                x=opt_df["Ticker"], y=opt_df["Max Sharpe"], name="Max Sharpe (Mean-Variance)",
+                marker_color="#EF553B",
+            ))
+            fig_opt.add_trace(go.Bar(
+                x=opt_df["Ticker"], y=opt_df["Risk Parity"], name="Risk Parity (Equal Risk)",
+                marker_color="#00CC96",
+            ))
+            fig_opt.add_trace(go.Bar(
+                x=opt_df["Ticker"], y=opt_df["Black-Litterman"], name="Black-Litterman (Market Implied)",
+                marker_color="#AB63FA",
+            ))
+            fig_opt.add_trace(go.Bar(
+                x=opt_df["Ticker"], y=opt_df["Min CVaR"], name="Min CVaR (Tail Risk Optimized)",
+                marker_color="#FFA15A",
+            ))
+            fig_opt.update_layout(
+                barmode="group",
+                xaxis_title="Ticker",
+                yaxis_title="Weight",
+                yaxis_tickformat=".0%",
+                legend=dict(orientation="h", y=1.02, x=0),
+                margin=dict(l=40, r=20, t=30, b=40),
+                height=max(520, len(opt_df) * 32),
+                hovermode="x unified",
+            )
+            st.plotly_chart(fig_opt, width='stretch')
 
-        except Exception as e:
-            st.warning(f"Optimization could not be computed: {e}")
+            st.markdown("##### Strategy Weights Table")
+            table_df = opt_df.copy()
+            strategy_cols = [
+                "Current Weight",
+                "Max Sharpe",
+                "Risk Parity",
+                "Black-Litterman",
+                "Min CVaR",
+            ]
+            table_df["Best Strategy"] = table_df[strategy_cols].idxmax(axis=1)
+            for c in strategy_cols:
+                table_df[c] = table_df[c].map("{:.1%}".format)
+            st.dataframe(table_df, width='stretch', hide_index=True)
 
 
 # ==================== TAB 7 - MONTE CARLO SIMULATION ====================
