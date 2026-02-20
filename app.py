@@ -17,10 +17,17 @@ import json
 import os
 from datetime import date, timedelta
 try:
-    from pypfopt import risk_models
+    import pypfopt
     HAS_PYPFOPT = True
-except ImportError:
+except Exception:
+    pypfopt = None
     HAS_PYPFOPT = False
+try:
+    from pypfopt import risk_models
+    HAS_RISK_MODELS = True
+except Exception:
+    risk_models = None
+    HAS_RISK_MODELS = False
 try:
     import statsmodels.api as sm_api
     HAS_STATSMODELS = True
@@ -791,7 +798,7 @@ with tab_risk:
     st.subheader("Annualized Covariance Matrix")
 
     asset_prices = prices[valid_tickers]
-    if HAS_PYPFOPT:
+    if HAS_RISK_MODELS:
         st.caption("Computed with `pypfopt.risk_models.CovarianceShrinkage` (Ledoit-Wolf) — "
                    "a robust estimator that reduces estimation noise.")
         try:
@@ -800,7 +807,7 @@ with tab_risk:
             cov_matrix = risk_models.sample_cov(asset_prices)
     else:
         st.caption("Computed from sample returns (annualized). "
-                   "Install `pyportfolioopt` for Ledoit-Wolf shrinkage estimator.")
+                   "Install `pyportfolioopt` and `scikit-learn` for the Ledoit-Wolf shrinkage estimator.")
         cov_matrix = asset_prices.pct_change().dropna().cov() * 252
 
     fig_cov = go.Figure(data=go.Heatmap(
@@ -1392,7 +1399,10 @@ with tab_opt:
     )
 
     if not HAS_PYPFOPT:
-        st.warning("Install `PyPortfolioOpt` to run portfolio optimization.")
+        st.warning(
+            "PyPortfolioOpt is not available in this runtime. Ensure `PyPortfolioOpt` is in "
+            "`requirements.txt`, redeploy, and check build logs for installation errors."
+        )
     else:
         try:
             from pypfopt import expected_returns
