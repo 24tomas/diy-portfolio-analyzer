@@ -12,6 +12,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import quantstats as qs
 import time
+import random
 import json
 import os
 from datetime import date, timedelta
@@ -35,6 +36,7 @@ st.set_page_config(
 # 2. PORTFOLIO STORAGE (JSON file on disk)
 # ──────────────────────────────────────────────
 PORTFOLIO_FILE = "saved_portfolios.json"
+STRESS_START_DATE = date(2007, 1, 1)
 
 def load_saved_portfolios() -> dict:
     if os.path.exists(PORTFOLIO_FILE):
@@ -68,7 +70,7 @@ with st.sidebar:
             key="load_choice",
         )
         if load_choice != "— New portfolio —":
-            if st.button(f"📂 Load '{load_choice}'", use_container_width=True):
+            if st.button(f"📂 Load '{load_choice}'", width='stretch'):
                 data = saved[load_choice]
                 st.session_state["holdings"] = pd.DataFrame(data["holdings"])
                 st.rerun()
@@ -79,7 +81,7 @@ with st.sidebar:
             key="del_choice",
         )
         if del_choice != "—":
-            if st.button(f"🗑️ Delete '{del_choice}'", use_container_width=True):
+            if st.button(f"🗑️ Delete '{del_choice}'", width='stretch'):
                 del st.session_state["saved_portfolios"][del_choice]
                 save_portfolios_to_disk(st.session_state["saved_portfolios"])
                 st.rerun()
@@ -100,7 +102,7 @@ with st.sidebar:
     edited_holdings = st.data_editor(
         st.session_state["holdings"],
         num_rows="dynamic",
-        use_container_width=True,
+        width='stretch',
         column_config={
             "Ticker": st.column_config.TextColumn(
                 "Ticker", help="Stock symbol, e.g. AAPL", required=True),
@@ -114,7 +116,7 @@ with st.sidebar:
 
     # Save current portfolio
     save_name = st.text_input("Save current portfolio as", key="save_name_input")
-    if st.button("💾 Save Portfolio", use_container_width=True):
+    if st.button("💾 Save Portfolio", width='stretch'):
         name = save_name.strip()
         if not name:
             st.warning("Enter a name first.")
@@ -149,7 +151,17 @@ with st.sidebar:
     risk_free_rate = st.number_input("Risk-Free Rate (%)", min_value=0.0,
                                      max_value=20.0, value=4.5, step=0.1) / 100
 
-    run_btn = st.button("🚀  Analyze Portfolio", type="primary", use_container_width=True)
+    fetch_sector_data = st.checkbox(
+        "Fetch sector/industry metadata",
+        value=False,
+        help="Adds extra Yahoo requests per ticker. Keep off to reduce rate-limit risk.",
+    )
+
+    run_btn = st.button("🚀  Analyze Portfolio", type="primary", width='stretch')
+
+    if st.button("Clear cached data", width='stretch'):
+        st.cache_data.clear()
+        st.success("Cleared Streamlit cached data.")
 
 
 # ──────────────────────────────────────────────
@@ -167,19 +179,34 @@ def validate_holdings(df: pd.DataFrame) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def download_prices(tickers, start, end, max_retries=3):
+@st.cache_data(show_spinner=False, ttl=6 * 3600, persist="disk", max_entries=128)
+def download_prices(tickers: tuple, start, end, max_retries=5):
+    tickers = list(tickers)
+    last_error = None
     for attempt in range(1, max_retries + 1):
-        raw = yf.download(tickers, start=start, end=end,
-                          auto_adjust=True, progress=False,
-                          timeout=30, threads=False)
-        if not raw.empty:
+        try:
+            raw = yf.download(
+                tickers,
+                start=start,
+                end=end,
+                auto_adjust=True,
+                progress=False,
+                timeout=30,
+                threads=False,
+            )
+            if raw.empty:
+                raise RuntimeError("Yahoo returned an empty response.")
             break
+        except Exception as e:
+            last_error = e
         if attempt < max_retries:
-            w = 5 * attempt
-            st.warning(f"⏳ Retry {attempt}/{max_retries} — waiting {w}s …")
-            time.sleep(w)
-    if raw.empty:
-        return pd.DataFrame()
+            wait = min(90, (2 ** attempt) + random.uniform(0.5, 1.5))
+            time.sleep(wait)
+    else:
+        raise RuntimeError(
+            f"Yahoo download failed after {max_retries} attempts. Last error: {last_error}"
+        )
+
     if isinstance(raw.columns, pd.MultiIndex):
         prices = raw["Close"].copy()
         if isinstance(prices, pd.Series):
@@ -187,11 +214,12 @@ def download_prices(tickers, start, end, max_retries=3):
     else:
         prices = raw[["Close"]].copy()
         prices.columns = [tickers[0]]
-    bad = prices.columns[prices.isna().all()]
-    if len(bad):
-        st.warning(f"⚠️  No data for: **{', '.join(bad)}** — excluded.")
-        prices = prices.drop(columns=bad)
-    return prices.ffill().bfill()
+
+    prices = prices.ffill().bfill()
+    prices = prices.dropna(axis=1, how="all")
+    if prices.empty:
+        raise RuntimeError("Yahoo returned no usable closing price columns.")
+    return prices
 
 
 def compute_weights_and_returns(prices, holdings):
@@ -252,6 +280,27 @@ def download_fama_french() -> pd.DataFrame:
     return ff_df
 
 
+@st.cache_data(show_spinner="🏢 Looking up sector data …", ttl=7 * 86400, persist="disk", max_entries=256)
+def get_sector_map(tickers: tuple) -> dict:
+    """
+    For each ticker, query yf.Ticker(t).info to retrieve sector and industry.
+    Returns dict: {ticker: {"sector": ..., "industry": ...}}.
+    Cached for 7 days. Accepts a tuple (not list) so Streamlit can hash it.
+    """
+    result = {}
+    for t in tickers:
+        try:
+            info = yf.Ticker(t).info
+            result[t] = {
+                "sector": info.get("sector", "Unknown"),
+                "industry": info.get("industry", "Unknown"),
+            }
+        except Exception:
+            result[t] = {"sector": "Unknown", "industry": "Unknown"}
+        time.sleep(0.8)  # slower to lower rate-limit risk for metadata calls
+    return result
+
+
 # ──────────────────────────────────────────────
 # 5. MAIN — RUN ON BUTTON CLICK
 # ──────────────────────────────────────────────
@@ -262,11 +311,15 @@ if not run_btn and "port_ret" not in st.session_state:
     st.stop()
 
 if run_btn:
+    if end_date <= start_date:
+        st.error("End Date must be after Start Date.")
+        st.stop()
+
     holdings = validate_holdings(edited_holdings)
     st.session_state["holdings"] = holdings
     bench = benchmark_ticker.strip().upper()
 
-    # ── Gather all tickers we need (portfolio + bench + comparison) ──
+    # Gather all tickers we need (portfolio + benchmark + comparison)
     all_tickers = list(dict.fromkeys(holdings["Ticker"].tolist() + [bench]))
 
     comp_holdings = None
@@ -279,18 +332,41 @@ if run_btn:
                 if t not in all_tickers:
                     all_tickers.append(t)
 
-    with st.spinner("📡 Downloading data from Yahoo Finance …"):
-        prices = download_prices(all_tickers, start_date, end_date)
+    all_tickers = tuple(sorted(all_tickers))
+    full_start = min(start_date, STRESS_START_DATE)
+
+    with st.spinner("Downloading data from Yahoo Finance..."):
+        try:
+            all_prices = download_prices(all_tickers, full_start, end_date)
+        except Exception as e:
+            st.error(
+                "Yahoo Finance download failed. This is usually a temporary "
+                "rate-limit or upstream issue."
+            )
+            st.info(
+                "Try again in 5-15 minutes. Keep ticker count small and leave "
+                "'Fetch sector/industry metadata' disabled unless needed."
+            )
+            st.caption(f"Details: {e}")
+            st.stop()
+
+    prices = all_prices.loc[
+        (all_prices.index >= pd.Timestamp(start_date))
+        & (all_prices.index <= pd.Timestamp(end_date))
+    ].copy()
+
+    missing = [t for t in all_tickers if t not in all_prices.columns]
+    if missing:
+        st.warning(f"No data for: **{', '.join(missing)}**. Excluded.")
 
     if prices.empty:
-        st.error("❌ Yahoo Finance returned no data.\n\n"
-                 "**Fix:** Close (`Ctrl+C`), wait 2–3 min, relaunch.")
+        st.error("Yahoo Finance returned no data in the selected date range.")
         st.stop()
 
     port_ret, ind_ret, wt = compute_weights_and_returns(prices, holdings)
 
     if bench not in prices.columns:
-        st.error(f"❌  Benchmark **{bench}** has no data.")
+        st.error(f"Benchmark **{bench}** has no data.")
         st.stop()
     bench_ret = prices[bench].pct_change().dropna()
     bench_ret.name = "Benchmark"
@@ -312,9 +388,11 @@ if run_btn:
     if comp_ret is not None:
         comp_ret = comp_ret.reindex(common).dropna()
 
-    # Stress test data (2007+)
-    with st.spinner("📡 Downloading historical stress-test data …"):
-        stress_prices = download_prices(all_tickers, date(2007,1,1), end_date)
+    # Stress test data (2007+) reuses the already downloaded full history
+    stress_prices = all_prices.loc[
+        (all_prices.index >= pd.Timestamp(STRESS_START_DATE))
+        & (all_prices.index <= pd.Timestamp(end_date))
+    ].copy()
     if not stress_prices.empty:
         stress_port, _, _ = compute_weights_and_returns(stress_prices, holdings)
         stress_bench = stress_prices[bench].pct_change().dropna() if bench in stress_prices.columns else pd.Series(dtype=float)
@@ -322,12 +400,22 @@ if run_btn:
         stress_port = pd.Series(dtype=float)
         stress_bench = pd.Series(dtype=float)
 
-    # Fama-French factors
+    # Fama-French factors — separate source (Ken French website), no Yahoo
     try:
         ff_factors = download_fama_french()
     except Exception as e:
         st.warning(f"⚠️  Could not download Fama-French factors: {e}")
         ff_factors = pd.DataFrame()
+
+    # Sector map — cached, only portfolio tickers (not benchmark)
+    portfolio_tickers = tuple(sorted(holdings["Ticker"].tolist()))
+    if fetch_sector_data:
+        try:
+            sector_map = get_sector_map(portfolio_tickers)
+        except Exception:
+            sector_map = {t: {"sector": "Unknown", "industry": "Unknown"} for t in portfolio_tickers}
+    else:
+        sector_map = {t: {"sector": "Unknown", "industry": "Unknown"} for t in portfolio_tickers}
 
     # Store everything
     for k, v in {
@@ -336,7 +424,7 @@ if run_btn:
         "holdings": holdings, "prices": prices,
         "stress_port": stress_port, "stress_bench": stress_bench,
         "comp_ret": comp_ret, "comp_wt": comp_wt, "comp_name": comp_name,
-        "ff_factors": ff_factors,
+        "ff_factors": ff_factors, "sector_map": sector_map,
     }.items():
         st.session_state[k] = v
 
@@ -355,14 +443,15 @@ comp_ret     = st.session_state.get("comp_ret")
 comp_wt      = st.session_state.get("comp_wt")
 comp_name    = st.session_state.get("comp_name")
 ff_factors   = st.session_state.get("ff_factors", pd.DataFrame())
+sector_map   = st.session_state.get("sector_map", {})
 
 
 # ──────────────────────────────────────────────
 # 6. HOLDINGS SUMMARY & KEY METRICS
 # ──────────────────────────────────────────────
-def annualized_return(r): return ((1+r).prod() ** (252/max(len(r),1))) - 1
+def annualized_return(r): return ((1 + r).prod() ** (252 / max(len(r), 1))) - 1
 def annualized_vol(r):    return r.std() * np.sqrt(252)
-def max_drawdown(r):      c = (1+r).cumprod(); return ((c - c.cummax()) / c.cummax()).min()
+def max_drawdown(r):      c = (1 + r).cumprod(); return ((c - c.cummax()) / c.cummax()).min()
 
 st.subheader("Your Holdings")
 disp = holdings.copy()
@@ -371,11 +460,14 @@ disp["Price"] = disp["Ticker"].map(latest)
 disp["Value"] = disp["Shares"] * disp["Price"]
 total_val = disp["Value"].sum()
 disp["Weight"] = disp["Value"] / total_val
+# Add sector column if available
+if sector_map:
+    disp["Sector"] = disp["Ticker"].map(lambda t: sector_map.get(t, {}).get("sector", "Unknown"))
 disp_fmt = disp.copy()
 disp_fmt["Price"]  = disp["Price"].map("${:,.2f}".format)
 disp_fmt["Value"]  = disp["Value"].map("${:,.2f}".format)
 disp_fmt["Weight"] = disp["Weight"].map("{:.1%}".format)
-st.dataframe(disp_fmt, use_container_width=True, hide_index=True)
+st.dataframe(disp_fmt, width='stretch', hide_index=True)
 
 m1, m2, m3, m4, m5 = st.columns(5)
 ann_ret = annualized_return(port_ret)
@@ -426,7 +518,7 @@ with tab_perf:
                         legend=dict(orientation="h", y=1.02, x=0),
                         margin=dict(l=50, r=20, t=40, b=40), height=460,
                         hovermode="x unified")
-    st.plotly_chart(fig_g, use_container_width=True)
+    st.plotly_chart(fig_g, width='stretch')
 
     # Metric cards
     st.subheader("Return Metrics")
@@ -440,9 +532,9 @@ with tab_perf:
     b_vol     = qs.stats.volatility(bench_ret)
 
     k1, k2, k3 = st.columns(3)
-    k1.metric("Total Return", f"{qs_total:.2%}", delta=f"{qs_total-b_total:+.2%} vs {bench}")
-    k2.metric("CAGR",         f"{qs_cagr:.2%}",  delta=f"{qs_cagr-b_cagr:+.2%} vs {bench}")
-    k3.metric("Ann. Vol.",    f"{qs_vol:.2%}",    delta=f"{qs_vol-b_vol:+.2%} vs {bench}",
+    k1.metric("Total Return", f"{qs_total:.2%}", delta=f"{qs_total - b_total:+.2%} vs {bench}")
+    k2.metric("CAGR",         f"{qs_cagr:.2%}",  delta=f"{qs_cagr - b_cagr:+.2%} vs {bench}")
+    k3.metric("Ann. Vol.",    f"{qs_vol:.2%}",    delta=f"{qs_vol - b_vol:+.2%} vs {bench}",
               delta_color="inverse")
     k4, k5, k6 = st.columns(3)
     k4.metric("Sharpe Ratio",      f"{qs_sharpe:.2f}")
@@ -493,17 +585,17 @@ with tab_perf:
                 "Kurtosis": lambda: f"{qs.stats.kurtosis(comp_ret):.2f}",
             }
             cols[comp_name].append(fn_map.get(metric, lambda: "—")())
-    st.dataframe(pd.DataFrame(cols).set_index("Metric"), use_container_width=True)
+    st.dataframe(pd.DataFrame(cols).set_index("Metric"), width='stretch')
 
     # Monthly heatmap
     st.subheader("Monthly Returns Heatmap")
-    monthly = port_ret.resample("ME").apply(lambda x: (1+x).prod()-1)
+    monthly = port_ret.resample("ME").apply(lambda x: (1 + x).prod() - 1)
     mdf = pd.DataFrame({"Year": monthly.index.year, "Month": monthly.index.month,
                          "Return": monthly.values})
     piv = mdf.pivot_table(index="Year", columns="Month", values="Return", aggfunc="first")
-    lbl = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    lbl = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     piv.columns = lbl[:len(piv.columns)]
-    yearly = port_ret.resample("YE").apply(lambda x: (1+x).prod()-1)
+    yearly = port_ret.resample("YE").apply(lambda x: (1 + x).prod() - 1)
     piv["YTD"] = piv.index.map(dict(zip(yearly.index.year, yearly.values)))
     fig_hm = go.Figure(data=go.Heatmap(
         z=piv.values, x=piv.columns.tolist(), y=piv.index.astype(str),
@@ -511,9 +603,9 @@ with tab_perf:
         text=np.vectorize(lambda v: f"{v:.1%}" if not np.isnan(v) else "")(piv.values),
         texttemplate="%{text}",
         hovertemplate="Year %{y} — %{x}<br>Return: %{z:.2%}<extra></extra>"))
-    fig_hm.update_layout(height=max(300, len(piv)*40),
+    fig_hm.update_layout(height=max(300, len(piv) * 40),
                          margin=dict(l=40, r=20, t=20, b=40))
-    st.plotly_chart(fig_hm, use_container_width=True)
+    st.plotly_chart(fig_hm, width='stretch')
 
     # Return distribution
     st.subheader("Daily Return Distribution")
@@ -535,7 +627,7 @@ with tab_perf:
                            xaxis_tickformat=".1%",
                            legend=dict(orientation="h", y=1.02, x=0),
                            margin=dict(l=40, r=20, t=40, b=40))
-    st.plotly_chart(fig_dist, use_container_width=True)
+    st.plotly_chart(fig_dist, width='stretch')
 
 
 # ==================== TAB 2 — RISK & CONCENTRATION ====================
@@ -547,7 +639,7 @@ with tab_risk:
     # ── 1. HHI (Herfindahl-Hirschman Index) ─────────────
     st.subheader("Portfolio Concentration — HHI")
     hhi = float(np.sum(w_arr ** 2))
-    hhi_norm = (hhi - 1/len(w_arr)) / (1 - 1/len(w_arr)) if len(w_arr) > 1 else 1.0
+    hhi_norm = (hhi - 1 / len(w_arr)) / (1 - 1 / len(w_arr)) if len(w_arr) > 1 else 1.0
 
     hh1, hh2 = st.columns([1, 2])
     with hh1:
@@ -596,7 +688,7 @@ with tab_risk:
             margin=dict(l=20, r=20, t=20, b=40),
             height=max(300, len(wt_sorted) * 36),
         )
-        st.plotly_chart(fig_bar_w, use_container_width=True)
+        st.plotly_chart(fig_bar_w, width='stretch')
 
     with col_b:
         st.subheader("Rolling 60-Day Volatility")
@@ -612,13 +704,84 @@ with tab_risk:
                                         name=comp_name,
                                         line=dict(color="#00CC96", dash="dash")))
         fig_rv.update_layout(yaxis_tickformat=".0%",
-                             height=max(300, len(wt_sorted)*36),
+                             height=max(300, len(wt_sorted) * 36),
                              margin=dict(l=40, r=20, t=20, b=40))
-        st.plotly_chart(fig_rv, use_container_width=True)
+        st.plotly_chart(fig_rv, width='stretch')
 
     st.divider()
 
-    # ── 3. Covariance matrix (PyPortfolioOpt) ───────────
+    # ── 3. Sector Exposure (NEW) ────────────────────────
+    st.subheader("Sector Exposure")
+    if sector_map:
+        # Build a DataFrame: ticker → weight → sector
+        sector_df = pd.DataFrame({
+            "Ticker": valid_tickers,
+            "Weight": wt[valid_tickers].values,
+            "Sector": [sector_map.get(t, {}).get("sector", "Unknown") for t in valid_tickers],
+            "Industry": [sector_map.get(t, {}).get("industry", "Unknown") for t in valid_tickers],
+        })
+
+        # Aggregate weight by sector
+        sector_agg = sector_df.groupby("Sector", as_index=False)["Weight"].sum()
+        sector_agg = sector_agg.sort_values("Weight", ascending=False)
+
+        sec_col1, sec_col2 = st.columns([1, 1])
+
+        with sec_col1:
+            # Donut chart
+            fig_sector = px.pie(
+                sector_agg, names="Sector", values="Weight",
+                hole=0.4, color_discrete_sequence=px.colors.qualitative.Set2,
+            )
+            fig_sector.update_traces(
+                textposition="inside", textinfo="percent+label",
+                hovertemplate="<b>%{label}</b><br>Weight: %{value:.1%}<extra></extra>",
+            )
+            fig_sector.update_layout(
+                margin=dict(l=20, r=20, t=20, b=20), height=400,
+                showlegend=False,
+            )
+            st.plotly_chart(fig_sector, width='stretch')
+
+        with sec_col2:
+            # Detailed breakdown table
+            st.markdown("**Sector Breakdown**")
+            sec_display = sector_agg.copy()
+            sec_display["Weight"] = sec_display["Weight"].map("{:.1%}".format)
+            st.dataframe(sec_display, width='stretch', hide_index=True)
+
+            # Per-ticker detail
+            st.markdown("**Holdings by Sector**")
+            detail = sector_df[["Ticker", "Sector", "Industry", "Weight"]].copy()
+            detail = detail.sort_values(["Sector", "Weight"], ascending=[True, False])
+            detail["Weight"] = detail["Weight"].map("{:.1%}".format)
+            st.dataframe(detail, width='stretch', hide_index=True)
+
+        # Concentration insight
+        top_sector = sector_agg.iloc[0]
+        n_sectors = len(sector_agg)
+        if top_sector["Weight"] > 0.5:
+            st.warning(
+                f"⚠️ **{top_sector['Sector']}** accounts for **{top_sector['Weight']:.1%}** "
+                f"of your portfolio — over half your exposure is in a single sector. "
+                f"Consider diversifying across more sectors."
+            )
+        elif n_sectors <= 2:
+            st.info(
+                f"📊 Your portfolio spans only **{n_sectors} sector(s)**. "
+                "Broader sector exposure can help reduce concentration risk."
+            )
+        else:
+            st.success(
+                f"✅ Your portfolio spans **{n_sectors} sectors**, "
+                f"with the largest (**{top_sector['Sector']}**) at **{top_sector['Weight']:.1%}**."
+            )
+    else:
+        st.info("Sector data not available. Re-run analysis to fetch sector information.")
+
+    st.divider()
+
+    # ── 4. Covariance matrix (PyPortfolioOpt) ───────────
     st.subheader("Annualized Covariance Matrix")
 
     asset_prices = prices[valid_tickers]
@@ -641,9 +804,9 @@ with tab_risk:
         text=np.round(cov_matrix.values, 4), texttemplate="%{text}",
         hovertemplate="%{y} / %{x}<br>Cov: %{z:.4f}<extra></extra>",
     ))
-    fig_cov.update_layout(height=max(350, len(valid_tickers)*55),
+    fig_cov.update_layout(height=max(350, len(valid_tickers) * 55),
                           margin=dict(l=40, r=20, t=20, b=40))
-    st.plotly_chart(fig_cov, use_container_width=True)
+    st.plotly_chart(fig_cov, width='stretch')
 
     # Also show correlation
     st.subheader("Asset Correlation Matrix")
@@ -653,13 +816,13 @@ with tab_risk:
         colorscale="RdBu_r", zmid=0,
         text=np.round(corr.values, 2), texttemplate="%{text}",
         zmin=-1, zmax=1))
-    fig_corr.update_layout(height=max(350, len(valid_tickers)*55),
+    fig_corr.update_layout(height=max(350, len(valid_tickers) * 55),
                            margin=dict(l=40, r=20, t=20, b=40))
-    st.plotly_chart(fig_corr, use_container_width=True)
+    st.plotly_chart(fig_corr, width='stretch')
 
     st.divider()
 
-    # ── 4. Marginal Contribution to Risk (MCR) ─────────
+    # ── 5. Marginal Contribution to Risk (MCR) ─────────
     st.subheader("Risk Contribution by Asset")
     st.caption(
         "**Marginal Contribution to Risk (MCR)** = how much each extra dollar in "
@@ -698,10 +861,10 @@ with tab_risk:
         barmode="group", xaxis_tickformat=".0%",
         xaxis_title="Proportion",
         legend=dict(orientation="h", y=1.02, x=0),
-        height=max(320, len(risk_df)*45),
+        height=max(320, len(risk_df) * 45),
         margin=dict(l=20, r=20, t=40, b=40),
     )
-    st.plotly_chart(fig_mcr, use_container_width=True)
+    st.plotly_chart(fig_mcr, width='stretch')
 
     # Detail table
     risk_display = risk_df.copy().sort_values("% of Risk", ascending=False)
@@ -709,7 +872,7 @@ with tab_risk:
     risk_display["MCR"]        = risk_display["MCR"].map("{:.4f}".format)
     risk_display["Risk Contribution"] = risk_display["Risk Contribution"].map("{:.4f}".format)
     risk_display["% of Risk"]  = risk_display["% of Risk"].map("{:.1%}".format)
-    st.dataframe(risk_display, use_container_width=True, hide_index=True)
+    st.dataframe(risk_display, width='stretch', hide_index=True)
 
     # Key insight
     top_risk = risk_df.sort_values("% of Risk", ascending=False).iloc[0]
@@ -741,13 +904,13 @@ with tab_factor:
     sf2.metric("Alpha (daily)", f"{intercept_sf:.4%}")
     sf3.metric("R²", f"{r_sf**2:.2%}")
     sf4.metric("Tracking Error",
-               f"{(aligned_sf.iloc[:,0]-aligned_sf.iloc[:,1]).std()*np.sqrt(252):.2%}")
+               f"{(aligned_sf.iloc[:, 0] - aligned_sf.iloc[:, 1]).std() * np.sqrt(252):.2%}")
 
     fig_sf = go.Figure(data=go.Scatter(
-        x=aligned_sf.iloc[:,1], y=aligned_sf.iloc[:,0],
+        x=aligned_sf.iloc[:, 1], y=aligned_sf.iloc[:, 0],
         mode="markers", marker=dict(size=3, opacity=0.35, color="#636EFA")))
-    xr = np.linspace(aligned_sf.iloc[:,1].min(), aligned_sf.iloc[:,1].max(), 100)
-    fig_sf.add_trace(go.Scatter(x=xr, y=intercept_sf+slope_sf*xr, mode="lines",
+    xr = np.linspace(aligned_sf.iloc[:, 1].min(), aligned_sf.iloc[:, 1].max(), 100)
+    fig_sf.add_trace(go.Scatter(x=xr, y=intercept_sf + slope_sf * xr, mode="lines",
                                 name=f"β = {slope_sf:.3f}",
                                 line=dict(color="red", width=2)))
     fig_sf.update_layout(xaxis_title=f"Benchmark ({bench}) Daily Return",
@@ -756,7 +919,7 @@ with tab_factor:
                          height=400, margin=dict(l=50, r=20, t=30, b=40),
                          showlegend=True,
                          legend=dict(orientation="h", y=1.02, x=0))
-    st.plotly_chart(fig_sf, use_container_width=True)
+    st.plotly_chart(fig_sf, width='stretch')
 
     st.divider()
 
@@ -810,7 +973,7 @@ with tab_factor:
             ff2.metric(
                 "Market Beta (Mkt-RF)", f"{mkt_beta:.3f}",
                 help=f"p-value: {pvals['Mkt-RF']:.4f} | "
-                     f"95% CI: [{ci.loc['Mkt-RF','Lower 95%']:.3f}, {ci.loc['Mkt-RF','Upper 95%']:.3f}]",
+                     f"95% CI: [{ci.loc['Mkt-RF', 'Lower 95%']:.3f}, {ci.loc['Mkt-RF', 'Upper 95%']:.3f}]",
             )
             ff3.metric(
                 "Size Beta (SMB)", f"{smb_beta:.3f}",
@@ -870,7 +1033,7 @@ with tab_factor:
                 height=280,
                 margin=dict(l=100, r=60, t=20, b=40),
             )
-            st.plotly_chart(fig_betas, use_container_width=True)
+            st.plotly_chart(fig_betas, width='stretch')
 
             st.caption(
                 "**Colored bars** are statistically significant at the 5% level. "
@@ -951,7 +1114,7 @@ with tab_factor:
             reg_display["p-value"]     = reg_display["p-value"].map("{:.4f}".format)
             reg_display["95% CI Lower"] = reg_display["95% CI Lower"].map("{:.4f}".format)
             reg_display["95% CI Upper"] = reg_display["95% CI Upper"].map("{:.4f}".format)
-            st.dataframe(reg_display, use_container_width=True)
+            st.dataframe(reg_display, width='stretch')
 
 
 # ==================== TAB 4 — DRAWDOWNS & TAIL RISK ====================
@@ -1024,7 +1187,7 @@ with tab_dd:
         margin=dict(l=50, r=20, t=40, b=40), height=420,
         hovermode="x unified",
     )
-    st.plotly_chart(fig_uw, use_container_width=True)
+    st.plotly_chart(fig_uw, width='stretch')
 
     st.divider()
 
@@ -1040,10 +1203,10 @@ with tab_dd:
             "Start":    dd_details["start"].astype(str),
             "Trough":   dd_details["valley"].astype(str),
             "Recovery":  dd_details["end"].apply(lambda x: str(x) if pd.notna(x) and str(x) != "" else "Ongoing"),
-            "Max DD":   dd_details["max drawdown"].apply(lambda x: f"{x/100:.2%}"),
+            "Max DD":   dd_details["max drawdown"].apply(lambda x: f"{x / 100:.2%}"),
             "Duration (days)": dd_details["days"].astype(int),
         })
-        st.dataframe(dd_table, use_container_width=True, hide_index=True)
+        st.dataframe(dd_table, width='stretch', hide_index=True)
 
         # Drawdown periods visualization
         st.subheader("Top 5 Drawdowns Highlighted")
@@ -1062,16 +1225,16 @@ with tab_dd:
             seg = dd_series[mask]
             fig_top.add_trace(go.Scatter(
                 x=seg.index, y=seg.values,
-                fill="tozeroy", fillcolor=f"rgba({','.join(str(int(colors[i][j:j+2],16)) for j in (1,3,5))},0.25)",
+                fill="tozeroy", fillcolor=f"rgba({','.join(str(int(colors[i][j:j+2], 16)) for j in (1, 3, 5))},0.25)",
                 line=dict(color=colors[i], width=2),
-                name=f"#{i+1}: {row['max drawdown']/100:.1%}",
+                name=f"#{i + 1}: {row['max drawdown'] / 100:.1%}",
             ))
         fig_top.update_layout(
             yaxis_tickformat=".0%", yaxis_title="Drawdown",
             legend=dict(orientation="h", y=1.06, x=0),
             margin=dict(l=50, r=20, t=50, b=40), height=400,
         )
-        st.plotly_chart(fig_top, use_container_width=True)
+        st.plotly_chart(fig_top, width='stretch')
 
     st.divider()
 
@@ -1164,7 +1327,7 @@ with tab_dd:
             f"{qs.stats.gain_to_pain_ratio(bench_ret):.2f}",
         ],
     }
-    st.dataframe(pd.DataFrame(risk_stats).set_index("Metric"), use_container_width=True)
+    st.dataframe(pd.DataFrame(risk_stats).set_index("Metric"), width='stretch')
 
 
 # ==================== TAB 5 — STRESS TESTS ====================
@@ -1176,7 +1339,7 @@ with tab_stress:
         "Global Financial Crisis (Oct 2007 – Mar 2009)": ("2007-10-09", "2009-03-09"),
         "GFC — Lehman Phase (Sep – Nov 2008)":           ("2008-09-12", "2008-11-20"),
         "European Debt Crisis (Apr – Oct 2011)":         ("2011-04-29", "2011-10-03"),
-        "China Deval. / Oil Crash (Aug 2015 – Feb 2016)":("2015-08-10", "2016-02-11"),
+        "China Deval. / Oil Crash (Aug 2015 – Feb 2016)": ("2015-08-10", "2016-02-11"),
         "Vol-mageddon (Jan – Feb 2018)":                 ("2018-01-26", "2018-02-08"),
         "Q4 2018 Selloff (Sep – Dec 2018)":              ("2018-09-20", "2018-12-24"),
         "COVID Crash (Feb – Mar 2020)":                  ("2020-02-19", "2020-03-23"),
@@ -1197,11 +1360,11 @@ with tab_stress:
                 pr = (1 + sp.loc[mp]).prod() - 1
                 br = (1 + sb.loc[mb]).prod() - 1
                 results.append({"Scenario": name, "Portfolio": f"{pr:.2%}",
-                                "Benchmark": f"{br:.2%}", "Excess": f"{pr-br:+.2%}"})
+                                "Benchmark": f"{br:.2%}", "Excess": f"{pr - br:+.2%}"})
                 continue
         results.append({"Scenario": name, "Portfolio": "No data",
                         "Benchmark": "—", "Excess": "—"})
-    st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(results), width='stretch', hide_index=True)
 
     st.subheader("What-If: Uniform Market Shock")
     shock_pct = st.slider("Simulated benchmark drop (%)", -50, 0, -20, step=1)
