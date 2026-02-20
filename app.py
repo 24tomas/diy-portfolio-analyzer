@@ -21,6 +21,12 @@ try:
     HAS_PYPFOPT = True
 except ImportError:
     HAS_PYPFOPT = False
+try:
+    import statsmodels.api as sm_api
+    HAS_STATSMODELS = True
+except ImportError:
+    sm_api = None
+    HAS_STATSMODELS = False
 
 # ──────────────────────────────────────────────
 # 1. PAGE CONFIG
@@ -889,8 +895,6 @@ with tab_risk:
 
 # ==================== TAB 3 — FACTOR EXPOSURE (Fama-French 3-Factor) ====================
 with tab_factor:
-    import statsmodels.api as sm_api
-
     # ── Single-factor (CAPM) — always available ────────
     st.subheader("Single-Factor Model (CAPM vs Benchmark)")
 
@@ -931,7 +935,12 @@ with tab_factor:
         "**SMB** (Small Minus Big — size factor), and **HML** (High Minus Low — value factor)."
     )
 
-    if ff_factors is None or ff_factors.empty:
+    if not HAS_STATSMODELS:
+        st.warning(
+            "`statsmodels` is not installed, so Fama-French regression is unavailable. "
+            "Add `statsmodels` to `requirements.txt` and redeploy."
+        )
+    elif ff_factors is None or ff_factors.empty:
         st.warning("Fama-French factors could not be downloaded. "
                    "Check your internet connection and try again.")
     else:
