@@ -490,9 +490,9 @@ st.divider()
 # ──────────────────────────────────────────────
 # 7. TABS
 # ──────────────────────────────────────────────
-tab_perf, tab_risk, tab_factor, tab_dd, tab_stress = st.tabs(
-    ["📈 Performance", "⚖️ Risk & Concentration", "🔬 Factor Exposure",
-     "📉 Drawdowns", "🧪 Stress Tests"]
+tab_perf, tab_risk, tab_factor, tab_dd, tab_stress, tab_opt = st.tabs(
+    ["\U0001F4C8 Performance", "\u2696\ufe0f Risk & Concentration", "\U0001F52C Factor Exposure",
+     "\U0001F4C9 Drawdowns", "\U0001F9EA Stress Tests", "\U0001F3AF Optimization"]
 )
 
 
@@ -1382,8 +1382,99 @@ with tab_stress:
 
 
 # ──────────────────────────────────────────────
+
+# ==================== TAB 6 - OPTIMIZATION ====================
+with tab_opt:
+    st.subheader("Optimization: Max Sharpe vs Risk Parity")
+    st.caption(
+        "**Max Sharpe** picks weights that maximize expected excess return per unit of volatility. "
+        "**Risk Parity** targets a more balanced distribution of risk across holdings."
+    )
+
+    if not HAS_PYPFOPT:
+        st.warning("Install `PyPortfolioOpt` to run portfolio optimization.")
+    else:
+        try:
+            from pypfopt import expected_returns
+            from pypfopt.efficient_frontier import EfficientFrontier
+            try:
+                from pypfopt.hierarchical_portfolio import HRPOpt
+            except Exception:
+                HRPOpt = None
+
+            if len(valid_tickers) < 2:
+                st.info("Optimization needs at least 2 assets with valid price history.")
+            else:
+                asset_prices = prices[valid_tickers].copy()
+
+                # Annualized expected returns from historical mean returns.
+                exp_ret = expected_returns.mean_historical_return(asset_prices, frequency=252)
+
+                # Reuse covariance matrix from the Risk tab (Ledoit-Wolf when available).
+                try:
+                    cov_for_opt = cov_matrix.loc[valid_tickers, valid_tickers].copy()
+                except Exception:
+                    cov_for_opt = risk_models.CovarianceShrinkage(asset_prices).ledoit_wolf()
+
+                ef = EfficientFrontier(exp_ret, cov_for_opt)
+                ef.max_sharpe(risk_free_rate=rf)
+                max_sharpe_w = pd.Series(ef.clean_weights(), dtype=float).reindex(valid_tickers).fillna(0.0)
+
+                try:
+                    if HRPOpt is None:
+                        raise RuntimeError("HRPOpt unavailable")
+                    hrp = HRPOpt(returns=asset_prices.pct_change().dropna())
+                    risk_parity_w = pd.Series(hrp.optimize(), dtype=float).reindex(valid_tickers).fillna(0.0)
+                except Exception:
+                    vol = np.sqrt(np.diag(cov_for_opt.values))
+                    inv_vol = np.where(vol > 0, 1.0 / vol, 0.0)
+                    if inv_vol.sum() == 0:
+                        inv_vol = np.repeat(1.0 / len(valid_tickers), len(valid_tickers))
+                    risk_parity_w = pd.Series(inv_vol / inv_vol.sum(), index=valid_tickers, dtype=float)
+
+                current_w = wt.reindex(valid_tickers).fillna(0.0).astype(float)
+                if max_sharpe_w.sum() > 0:
+                    max_sharpe_w = max_sharpe_w / max_sharpe_w.sum()
+                if risk_parity_w.sum() > 0:
+                    risk_parity_w = risk_parity_w / risk_parity_w.sum()
+
+                opt_df = pd.DataFrame({
+                    "Ticker": valid_tickers,
+                    "Current Weight": current_w.values,
+                    "Max Sharpe Weight": max_sharpe_w.values,
+                    "Risk Parity Weight": risk_parity_w.values,
+                }).sort_values("Current Weight", ascending=False)
+
+                fig_opt = go.Figure()
+                fig_opt.add_trace(go.Bar(
+                    x=opt_df["Ticker"], y=opt_df["Current Weight"], name="Current Weight",
+                    marker_color="#636EFA",
+                ))
+                fig_opt.add_trace(go.Bar(
+                    x=opt_df["Ticker"], y=opt_df["Max Sharpe Weight"], name="Max Sharpe Weight",
+                    marker_color="#EF553B",
+                ))
+                fig_opt.add_trace(go.Bar(
+                    x=opt_df["Ticker"], y=opt_df["Risk Parity Weight"], name="Risk Parity Weight",
+                    marker_color="#00CC96",
+                ))
+                fig_opt.update_layout(
+                    barmode="group",
+                    xaxis_title="Ticker",
+                    yaxis_title="Weight",
+                    yaxis_tickformat=".0%",
+                    legend=dict(orientation="h", y=1.02, x=0),
+                    margin=dict(l=40, r=20, t=30, b=40),
+                    height=max(360, len(opt_df) * 28),
+                )
+                st.plotly_chart(fig_opt, width='stretch')
+
+        except Exception as e:
+            st.warning(f"Optimization could not be computed: {e}")
+
 st.divider()
 st.caption(
     "Data from Yahoo Finance via `yfinance`. Past performance is not indicative "
     "of future results. For educational/analytical purposes only — not financial advice."
 )
+
