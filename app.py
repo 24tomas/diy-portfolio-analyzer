@@ -34,6 +34,12 @@ try:
 except ImportError:
     sm_api = None
     HAS_STATSMODELS = False
+try:
+    from scipy.linalg import cholesky as sp_cholesky
+    HAS_SCIPY = True
+except Exception:
+    sp_cholesky = None
+    HAS_SCIPY = False
 
 # ──────────────────────────────────────────────
 # 1. PAGE CONFIG
@@ -497,9 +503,9 @@ st.divider()
 # ──────────────────────────────────────────────
 # 7. TABS
 # ──────────────────────────────────────────────
-tab_perf, tab_risk, tab_factor, tab_dd, tab_stress, tab_opt = st.tabs(
+tab_perf, tab_risk, tab_factor, tab_dd, tab_stress, tab_opt, tab_mc = st.tabs(
     ["\U0001F4C8 Performance", "\u2696\ufe0f Risk & Concentration", "\U0001F52C Factor Exposure",
-     "\U0001F4C9 Drawdowns", "\U0001F9EA Stress Tests", "\U0001F3AF Optimization"]
+     "\U0001F4C9 Drawdowns", "\U0001F9EA Stress Tests", "\U0001F3AF Optimization", "\U0001F3B2 Monte Carlo"]
 )
 
 
@@ -1132,6 +1138,116 @@ with tab_factor:
             reg_display["95% CI Upper"] = reg_display["95% CI Upper"].map("{:.4f}".format)
             st.dataframe(reg_display, width='stretch')
 
+            st.divider()
+
+            # Factor Return Attribution (JP Morgan-style)
+            st.markdown("##### Factor Return Attribution")
+            st.caption(
+                "Breaks annualized portfolio excess return into contributions from "
+                "Alpha, Market (Mkt-RF), Size (SMB), and Value (HML)."
+            )
+
+            mkt_ann = annualized_return(factors["Mkt-RF"])
+            smb_ann = annualized_return(factors["SMB"])
+            hml_ann = annualized_return(factors["HML"])
+            port_excess_ann = annualized_return(y)
+
+            market_contrib = mkt_beta * mkt_ann
+            size_contrib = smb_beta * smb_ann
+            value_contrib = hml_beta * hml_ann
+            alpha_contrib = alpha_annual
+            total_excess_model = alpha_contrib + market_contrib + size_contrib + value_contrib
+
+            wf_labels = [
+                "Alpha",
+                "Market Risk",
+                "Size Factor",
+                "Value Factor",
+                "Total Excess Return",
+            ]
+            wf_measures = ["relative", "relative", "relative", "relative", "total"]
+            wf_values = [alpha_contrib, market_contrib, size_contrib, value_contrib, 0.0]
+            wf_text = [
+                f"{alpha_contrib:+.2%}",
+                f"{market_contrib:+.2%}",
+                f"{size_contrib:+.2%}",
+                f"{value_contrib:+.2%}",
+                f"{total_excess_model:+.2%}",
+            ]
+
+            fig_attr = go.Figure(go.Waterfall(
+                x=wf_labels,
+                measure=wf_measures,
+                y=wf_values,
+                text=wf_text,
+                textposition="outside",
+                connector={"line": {"color": "#777"}},
+                increasing={"marker": {"color": "#2CA02C"}},
+                decreasing={"marker": {"color": "#D62728"}},
+                totals={"marker": {"color": "#1F77B4"}},
+            ))
+            fig_attr.update_layout(
+                height=430,
+                margin=dict(l=40, r=20, t=20, b=40),
+                yaxis_title="Annualized Contribution",
+                yaxis_tickformat="+.1%",
+            )
+            st.plotly_chart(fig_attr, width='stretch')
+
+            attr_df = pd.DataFrame({
+                "Factor": [
+                    "Alpha (Idiosyncratic)",
+                    "Market (Mkt-RF)",
+                    "Size (SMB)",
+                    "Value (HML)",
+                    "Total Excess Return (Model)",
+                    "Portfolio Excess Return (Actual)",
+                ],
+                "Beta (Sensitivity)": [
+                    np.nan,
+                    mkt_beta,
+                    smb_beta,
+                    hml_beta,
+                    np.nan,
+                    np.nan,
+                ],
+                "Factor Return (Ann.)": [
+                    np.nan,
+                    mkt_ann,
+                    smb_ann,
+                    hml_ann,
+                    np.nan,
+                    np.nan,
+                ],
+                "Contribution to Portfolio (Ann.)": [
+                    alpha_contrib,
+                    market_contrib,
+                    size_contrib,
+                    value_contrib,
+                    total_excess_model,
+                    port_excess_ann,
+                ],
+            })
+
+            attr_display = attr_df.copy()
+            attr_display["Beta (Sensitivity)"] = attr_display["Beta (Sensitivity)"].map(
+                lambda v: "—" if pd.isna(v) else f"{v:.3f}"
+            )
+            attr_display["Factor Return (Ann.)"] = attr_display["Factor Return (Ann.)"].map(
+                lambda v: "—" if pd.isna(v) else f"{v:+.2%}"
+            )
+            attr_display["Contribution to Portfolio (Ann.)"] = attr_display[
+                "Contribution to Portfolio (Ann.)"
+            ].map(lambda v: f"{v:+.2%}")
+            st.dataframe(attr_display, width='stretch', hide_index=True)
+
+            gap = total_excess_model - port_excess_ann
+            st.caption(
+                f"Verification: model-implied excess return = **{total_excess_model:+.2%}**, "
+                f"actual portfolio excess return = **{port_excess_ann:+.2%}** "
+                f"(gap: **{gap:+.2%}**)."
+            )
+
 
 # ==================== TAB 4 — DRAWDOWNS & TAIL RISK ====================
 with tab_dd:
@@ -1392,10 +1508,11 @@ with tab_stress:
 
 # ==================== TAB 6 - OPTIMIZATION ====================
 with tab_opt:
-    st.subheader("Optimization: Max Sharpe vs Risk Parity")
+    st.subheader("Optimization: Robust Portfolio Construction")
     st.caption(
-        "**Max Sharpe** picks weights that maximize expected excess return per unit of volatility. "
-        "**Risk Parity** targets a more balanced distribution of risk across holdings."
+        "**Max Sharpe** (mean-variance), **Risk Parity** (equal risk), "
+        "**Black-Litterman** (market-implied robust returns), and "
+        "**Min CVaR** (tail-risk minimization at 95%) compared against your current allocation."
     )
 
     if not HAS_PYPFOPT:
@@ -1405,7 +1522,7 @@ with tab_opt:
         )
     else:
         try:
-            from pypfopt import expected_returns
+            from pypfopt import expected_returns, black_litterman, efficient_frontier
             from pypfopt.efficient_frontier import EfficientFrontier
             try:
                 from pypfopt.hierarchical_portfolio import HRPOpt
@@ -1416,44 +1533,112 @@ with tab_opt:
                 st.info("Optimization needs at least 2 assets with valid price history.")
             else:
                 asset_prices = prices[valid_tickers].copy()
+                asset_returns = asset_prices.pct_change().dropna()
 
-                # Annualized expected returns from historical mean returns.
+                # Historical annualized expected returns (mean return model)
                 exp_ret = expected_returns.mean_historical_return(asset_prices, frequency=252)
 
-                # Reuse covariance matrix from the Risk tab (Ledoit-Wolf when available).
+                # Reuse covariance from Risk tab, fallback to local estimate.
                 try:
                     cov_for_opt = cov_matrix.loc[valid_tickers, valid_tickers].copy()
                 except Exception:
-                    cov_for_opt = risk_models.CovarianceShrinkage(asset_prices).ledoit_wolf()
+                    if HAS_RISK_MODELS:
+                        cov_for_opt = risk_models.CovarianceShrinkage(asset_prices).ledoit_wolf()
+                    else:
+                        cov_for_opt = asset_returns.cov() * 252
+                cov_for_opt = cov_for_opt.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+                cov_for_opt = 0.5 * (cov_for_opt + cov_for_opt.T)
 
-                ef = EfficientFrontier(exp_ret, cov_for_opt)
-                ef.max_sharpe(risk_free_rate=rf)
-                max_sharpe_w = pd.Series(ef.clean_weights(), dtype=float).reindex(valid_tickers).fillna(0.0)
+                def _zero_weights() -> pd.Series:
+                    return pd.Series(0.0, index=valid_tickers, dtype=float)
 
+                def _normalize_weights(w: pd.Series) -> pd.Series:
+                    w = w.reindex(valid_tickers).fillna(0.0).astype(float)
+                    s = float(w.sum())
+                    return (w / s) if s > 0 else w
+
+                warn_msgs = []
+
+                # 1) Max Sharpe (Mean-Variance)
+                max_sharpe_w = _zero_weights()
+                try:
+                    ef = EfficientFrontier(exp_ret, cov_for_opt)
+                    ef.max_sharpe(risk_free_rate=rf)
+                    max_sharpe_w = pd.Series(ef.clean_weights(), dtype=float)
+                except Exception as e:
+                    warn_msgs.append(f"Max Sharpe failed; using 0.0 weights. ({e})")
+
+                # 2) Risk Parity / Equal Risk
+                risk_parity_w = _zero_weights()
                 try:
                     if HRPOpt is None:
                         raise RuntimeError("HRPOpt unavailable")
-                    hrp = HRPOpt(returns=asset_prices.pct_change().dropna())
-                    risk_parity_w = pd.Series(hrp.optimize(), dtype=float).reindex(valid_tickers).fillna(0.0)
-                except Exception:
-                    vol = np.sqrt(np.diag(cov_for_opt.values))
-                    inv_vol = np.where(vol > 0, 1.0 / vol, 0.0)
-                    if inv_vol.sum() == 0:
-                        inv_vol = np.repeat(1.0 / len(valid_tickers), len(valid_tickers))
-                    risk_parity_w = pd.Series(inv_vol / inv_vol.sum(), index=valid_tickers, dtype=float)
+                    hrp = HRPOpt(returns=asset_returns)
+                    risk_parity_w = pd.Series(hrp.optimize(), dtype=float)
+                except Exception as e:
+                    try:
+                        vol = np.sqrt(np.diag(cov_for_opt.values))
+                        inv_vol = np.where(vol > 0, 1.0 / vol, 0.0)
+                        if inv_vol.sum() == 0:
+                            raise RuntimeError("Inverse-vol fallback has zero denominator.")
+                        risk_parity_w = pd.Series(inv_vol / inv_vol.sum(), index=valid_tickers, dtype=float)
+                        warn_msgs.append(f"HRP solver failed; used inverse-vol fallback. ({e})")
+                    except Exception as ee:
+                        warn_msgs.append(f"Risk Parity failed; using 0.0 weights. ({ee})")
+
+                # 3) Black-Litterman (Market-Implied Prior)
+                bl_w = _zero_weights()
+                try:
+                    # Market-implied risk aversion from benchmark daily returns.
+                    bench_mu_ann = float(bench_ret.mean() * 252)
+                    bench_var_ann = float(bench_ret.var() * 252)
+                    if bench_var_ann <= 1e-12:
+                        delta = 2.5
+                    else:
+                        delta = max((bench_mu_ann - rf) / bench_var_ann, 1e-6)
+
+                    # Stable equal-cap prior in lieu of live market caps.
+                    eq_mcaps = pd.Series(1.0, index=valid_tickers)
+                    pi_bl = black_litterman.market_implied_prior_returns(
+                        eq_mcaps, delta, cov_for_opt, risk_free_rate=rf
+                    )
+
+                    bl = black_litterman.BlackLittermanModel(cov_for_opt, pi=pi_bl, tau=0.05)
+                    bl_rets = bl.bl_returns()
+                    bl_cov = bl.bl_cov()
+
+                    ef_bl = EfficientFrontier(bl_rets, bl_cov)
+                    ef_bl.max_sharpe(risk_free_rate=rf)
+                    bl_w = pd.Series(ef_bl.clean_weights(), dtype=float)
+                except Exception as e:
+                    warn_msgs.append(f"Black-Litterman failed; using 0.0 weights. ({e})")
+
+                # 4) Minimum CVaR (95% confidence)
+                min_cvar_w = _zero_weights()
+                try:
+                    ecvar = efficient_frontier.EfficientCVaR(exp_ret, asset_returns, beta=0.95)
+                    ecvar.min_cvar()
+                    min_cvar_w = pd.Series(ecvar.clean_weights(), dtype=float)
+                except Exception as e:
+                    warn_msgs.append(f"Min CVaR failed; using 0.0 weights. ({e})")
 
                 current_w = wt.reindex(valid_tickers).fillna(0.0).astype(float)
-                if max_sharpe_w.sum() > 0:
-                    max_sharpe_w = max_sharpe_w / max_sharpe_w.sum()
-                if risk_parity_w.sum() > 0:
-                    risk_parity_w = risk_parity_w / risk_parity_w.sum()
+                max_sharpe_w = _normalize_weights(max_sharpe_w)
+                risk_parity_w = _normalize_weights(risk_parity_w)
+                bl_w = _normalize_weights(bl_w)
+                min_cvar_w = _normalize_weights(min_cvar_w)
 
                 opt_df = pd.DataFrame({
                     "Ticker": valid_tickers,
                     "Current Weight": current_w.values,
-                    "Max Sharpe Weight": max_sharpe_w.values,
-                    "Risk Parity Weight": risk_parity_w.values,
+                    "Max Sharpe": max_sharpe_w.values,
+                    "Risk Parity": risk_parity_w.values,
+                    "Black-Litterman": bl_w.values,
+                    "Min CVaR": min_cvar_w.values,
                 }).sort_values("Current Weight", ascending=False)
+
+                for msg in warn_msgs:
+                    st.caption(f"Warning: {msg}")
 
                 fig_opt = go.Figure()
                 fig_opt.add_trace(go.Bar(
@@ -1461,12 +1646,20 @@ with tab_opt:
                     marker_color="#636EFA",
                 ))
                 fig_opt.add_trace(go.Bar(
-                    x=opt_df["Ticker"], y=opt_df["Max Sharpe Weight"], name="Max Sharpe Weight",
+                    x=opt_df["Ticker"], y=opt_df["Max Sharpe"], name="Max Sharpe (Mean-Variance)",
                     marker_color="#EF553B",
                 ))
                 fig_opt.add_trace(go.Bar(
-                    x=opt_df["Ticker"], y=opt_df["Risk Parity Weight"], name="Risk Parity Weight",
+                    x=opt_df["Ticker"], y=opt_df["Risk Parity"], name="Risk Parity (Equal Risk)",
                     marker_color="#00CC96",
+                ))
+                fig_opt.add_trace(go.Bar(
+                    x=opt_df["Ticker"], y=opt_df["Black-Litterman"], name="Black-Litterman (Market Implied)",
+                    marker_color="#AB63FA",
+                ))
+                fig_opt.add_trace(go.Bar(
+                    x=opt_df["Ticker"], y=opt_df["Min CVaR"], name="Min CVaR (Tail Risk Optimized)",
+                    marker_color="#FFA15A",
                 ))
                 fig_opt.update_layout(
                     barmode="group",
@@ -1475,16 +1668,157 @@ with tab_opt:
                     yaxis_tickformat=".0%",
                     legend=dict(orientation="h", y=1.02, x=0),
                     margin=dict(l=40, r=20, t=30, b=40),
-                    height=max(360, len(opt_df) * 28),
+                    height=max(400, len(opt_df) * 30),
                 )
                 st.plotly_chart(fig_opt, width='stretch')
 
         except Exception as e:
             st.warning(f"Optimization could not be computed: {e}")
 
+
+# ==================== TAB 7 - MONTE CARLO SIMULATION ====================
+with tab_mc:
+    st.subheader("Monte Carlo Simulation (Correlated GBM)")
+
+    mc1, mc2, mc3 = st.columns(3)
+    with mc1:
+        sim_count = st.slider("Simulation Count", min_value=500, max_value=5000, value=1000, step=100)
+    with mc2:
+        horizon_years = st.slider("Forecast Horizon (Years)", min_value=1, max_value=10, value=5, step=1)
+    with mc3:
+        initial_investment = st.number_input(
+            "Initial Investment", min_value=100.0, value=10000.0, step=500.0, format="%.2f"
+        )
+
+    if len(valid_tickers) < 1:
+        st.warning("No valid assets available for simulation.")
+    else:
+        try:
+            w_mc = wt.reindex(valid_tickers).fillna(0.0).values.astype(float)
+            if w_mc.sum() <= 0:
+                raise ValueError("Current weights are not valid for simulation.")
+            w_mc = w_mc / w_mc.sum()
+
+            mu_ann = ind_ret[valid_tickers].mean().values.astype(float) * 252.0
+            cov_ann_df = cov_matrix.loc[valid_tickers, valid_tickers].astype(float).copy()
+            cov_ann = cov_ann_df.values
+            cov_ann = np.nan_to_num(cov_ann, nan=0.0, posinf=0.0, neginf=0.0)
+            cov_ann = 0.5 * (cov_ann + cov_ann.T)
+
+            n_assets = len(valid_tickers)
+            dt = 1.0 / 252.0
+            steps = int(252 * horizon_years)
+            sqrt_dt = np.sqrt(dt)
+            var_diag = np.clip(np.diag(cov_ann), 0.0, None)
+            drift = (mu_ann - 0.5 * var_diag) * dt
+
+            eye = np.eye(n_assets)
+            jitter = 1e-12
+            chol = None
+            for _ in range(8):
+                try:
+                    if HAS_SCIPY and sp_cholesky is not None:
+                        chol = sp_cholesky(cov_ann + jitter * eye, lower=True, check_finite=False)
+                    else:
+                        chol = np.linalg.cholesky(cov_ann + jitter * eye)
+                    break
+                except Exception:
+                    jitter *= 10
+
+            if chol is None:
+                raise ValueError("Cholesky decomposition failed for covariance matrix.")
+
+            rng = np.random.default_rng(42)
+            asset_values = (initial_investment * w_mc)[:, None] * np.ones((n_assets, sim_count), dtype=float)
+            port_paths = np.empty((steps + 1, sim_count), dtype=float)
+            port_paths[0, :] = initial_investment
+
+            with st.spinner("Running correlated Monte Carlo simulation..."):
+                for t in range(1, steps + 1):
+                    z = rng.standard_normal((n_assets, sim_count))
+                    corr_shocks = chol @ z
+                    log_returns = drift[:, None] + sqrt_dt * corr_shocks
+                    asset_values *= np.exp(log_returns)
+                    port_paths[t, :] = asset_values.sum(axis=0)
+
+            years_axis = np.arange(steps + 1) / 252.0
+            p05 = np.percentile(port_paths, 5, axis=1)
+            p50 = np.percentile(port_paths, 50, axis=1)
+            p95 = np.percentile(port_paths, 95, axis=1)
+
+            draw_n = min(50, sim_count)
+            path_idx = rng.choice(sim_count, size=draw_n, replace=False)
+
+            fig_mc = go.Figure()
+            for idx in path_idx:
+                fig_mc.add_trace(go.Scatter(
+                    x=years_axis,
+                    y=port_paths[:, idx],
+                    mode="lines",
+                    line=dict(color="rgba(140,140,140,0.20)", width=1),
+                    hoverinfo="skip",
+                    showlegend=False,
+                ))
+
+            fig_mc.add_trace(go.Scatter(
+                x=years_axis, y=p05, mode="lines",
+                name="Bear Case (5th Percentile)",
+                line=dict(color="#D62728", width=3),
+            ))
+            fig_mc.add_trace(go.Scatter(
+                x=years_axis, y=p50, mode="lines",
+                name="Base Case (Median)",
+                line=dict(color="#1F77B4", width=3),
+            ))
+            fig_mc.add_trace(go.Scatter(
+                x=years_axis, y=p95, mode="lines",
+                name="Bull Case (95th Percentile)",
+                line=dict(color="#2CA02C", width=3),
+            ))
+            fig_mc.update_layout(
+                title="Correlated Monte Carlo Forecast (GBM with Cholesky)",
+                xaxis_title="Years Ahead",
+                yaxis_title="Portfolio Value",
+                yaxis_tickprefix="$",
+                yaxis_tickformat=",.0f",
+                margin=dict(l=50, r=20, t=50, b=40),
+                legend=dict(orientation="h", y=1.02, x=0),
+                height=520,
+                hovermode="x unified",
+            )
+            st.plotly_chart(fig_mc, width='stretch')
+
+            end_vals = port_paths[-1, :]
+            bear_end = np.percentile(end_vals, 5)
+            base_end = np.percentile(end_vals, 50)
+            bull_end = np.percentile(end_vals, 95)
+
+            boardroom = pd.DataFrame({
+                "Scenario": ["Bear (5th Percentile)", "Base (Median)", "Bull (95th Percentile)"],
+                "Ending Wealth": [bear_end, base_end, bull_end],
+            })
+            boardroom["CAGR"] = (boardroom["Ending Wealth"] / initial_investment) ** (1.0 / horizon_years) - 1.0
+
+            boardroom_fmt = boardroom.copy()
+            boardroom_fmt["Ending Wealth"] = boardroom["Ending Wealth"].map("${:,.0f}".format)
+            boardroom_fmt["CAGR"] = boardroom["CAGR"].map("{:.2%}".format)
+
+            st.subheader("Boardroom Summary")
+            st.dataframe(boardroom_fmt, width='stretch', hide_index=True)
+
+            prob_below_initial = float(np.mean(end_vals < initial_investment))
+            st.metric(
+                "Monte Carlo VaR: P(Ending Wealth < Initial Investment)",
+                f"{prob_below_initial:.2%}",
+            )
+
+        except Exception as e:
+            st.warning(f"Monte Carlo simulation failed: {e}")
+
 st.divider()
 st.caption(
     "Data from Yahoo Finance via `yfinance`. Past performance is not indicative "
     "of future results. For educational/analytical purposes only — not financial advice."
 )
+
 
