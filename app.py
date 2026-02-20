@@ -1422,7 +1422,44 @@ with tab_dd:
 
     st.divider()
 
-    # â”€â”€ 5. Extended risk statistics table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # â”€â”€ 5. Return distribution analysis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    st.subheader("Return Distribution Analysis")
+    st.caption(
+        "Overlayed daily return distributions for your portfolio and benchmark. "
+        "Fatter tails indicate a higher frequency of extreme outcomes."
+    )
+
+    fig_dd_dist = go.Figure()
+    fig_dd_dist.add_trace(go.Histogram(
+        x=port_ret.values,
+        name="Portfolio",
+        nbinsx=90,
+        histnorm="probability density",
+        opacity=0.7,
+        marker_color="rgba(99,110,250,0.7)",
+    ))
+    fig_dd_dist.add_trace(go.Histogram(
+        x=bench_ret.values,
+        name=f"Benchmark ({bench})",
+        nbinsx=90,
+        histnorm="probability density",
+        opacity=0.7,
+        marker_color="rgba(239,85,59,0.7)",
+    ))
+    fig_dd_dist.update_layout(
+        barmode="overlay",
+        xaxis_title="Daily Return",
+        yaxis_title="Probability Density",
+        xaxis_tickformat=".1%",
+        legend=dict(orientation="h", y=1.02, x=0),
+        margin=dict(l=40, r=20, t=20, b=40),
+        height=360,
+    )
+    st.plotly_chart(fig_dd_dist, width='stretch')
+
+    st.divider()
+
+    # â”€â”€ 6. Extended risk statistics table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     st.subheader("Comprehensive Risk Statistics")
 
     risk_stats = {
@@ -1550,10 +1587,6 @@ with tab_opt:
         def _zero_weights() -> pd.Series:
             return pd.Series(0.0, index=valid_tickers, dtype=float)
 
-        def _equal_weights() -> pd.Series:
-            n = len(valid_tickers)
-            return pd.Series(np.repeat(1.0 / n, n), index=valid_tickers, dtype=float)
-
         def _normalize_weights(w: pd.Series) -> pd.Series:
             w = w.reindex(valid_tickers).fillna(0.0).astype(float)
             s = float(w.sum())
@@ -1630,39 +1663,24 @@ with tab_opt:
                 raise RuntimeError(f"Semi-variance optimizer failed: {res.message}")
             return pd.Series(res.x, index=valid_tickers, dtype=float)
 
-        warn_msgs = []
-
-        expected_returns_mod = None
-        black_litterman = None
-        EfficientFrontier = None
-        EfficientCVaR = None
-        HRPOpt = None
-
-        exp_ret = None
-
         try:
             from pypfopt import expected_returns as expected_returns_mod
             exp_ret = expected_returns_mod.mean_historical_return(asset_prices, frequency=252)
-        except Exception as e:
-            warn_msgs.append(f"Expected return model import failed; using simple mean-return estimate. ({e})")
+        except Exception:
             exp_ret = asset_returns.mean() * 252
-
         exp_ret = pd.Series(exp_ret, index=valid_tickers, dtype=float).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
+        EfficientFrontier = None
+        EfficientCVaR = None
+        black_litterman = None
         try:
             from pypfopt.efficient_frontier import EfficientFrontier, EfficientCVaR
-        except Exception as e:
-            warn_msgs.append(f"EfficientFrontier/EfficientCVaR import failed. ({e})")
-
-        try:
-            from pypfopt.hierarchical_portfolio import HRPOpt
-        except Exception as e:
-            warn_msgs.append(f"HRPOpt import failed; switching to ERC optimizer fallback. ({e})")
-
+        except Exception:
+            pass
         try:
             from pypfopt import black_litterman
-        except Exception as e:
-            warn_msgs.append(f"Black-Litterman import failed; using fallback allocation. ({e})")
+        except Exception:
+            pass
 
         # 1) Max Sharpe (Mean-Variance)
         max_sharpe_w = _zero_weights()
@@ -1671,42 +1689,32 @@ with tab_opt:
                 ef = EfficientFrontier(exp_ret, cov_for_opt)
                 ef.max_sharpe(risk_free_rate=rf)
                 max_sharpe_w = pd.Series(ef.clean_weights(), dtype=float)
-            except Exception as e:
-                warn_msgs.append(f"Max Sharpe failed; trying Min Volatility fallback. ({e})")
+            except Exception:
                 try:
                     ef = EfficientFrontier(exp_ret, cov_for_opt)
                     ef.min_volatility()
                     max_sharpe_w = pd.Series(ef.clean_weights(), dtype=float)
-                except Exception as ee:
-                    warn_msgs.append(f"Max Sharpe fallback failed; using equal weights. ({ee})")
-                    max_sharpe_w = _equal_weights()
-        else:
-            max_sharpe_w = _equal_weights()
+                except Exception:
+                    max_sharpe_w = _zero_weights()
 
         # 2) Risk Parity / Equal Risk Contribution
+        # Flow: Library -> Scipy ERC -> 0.0
         risk_parity_w = _zero_weights()
-        if HRPOpt is not None:
+        try:
+            from pypfopt.hierarchical_portfolio import HRPOpt
             try:
                 hrp = HRPOpt(returns=asset_returns)
                 risk_parity_w = pd.Series(hrp.optimize(), dtype=float)
-            except Exception as e:
-                warn_msgs.append(f"HRPOpt solve failed; using ERC optimizer fallback. ({e})")
-
-        if float(risk_parity_w.sum()) <= 0:
+            except Exception:
+                try:
+                    risk_parity_w = calculate_equal_risk_contribution(cov_for_opt)
+                except Exception:
+                    risk_parity_w = _zero_weights()
+        except Exception:
             try:
                 risk_parity_w = calculate_equal_risk_contribution(cov_for_opt)
-            except Exception as e:
-                warn_msgs.append(f"ERC optimizer fallback failed; using inverse-vol fallback. ({e})")
-                try:
-                    vol = np.sqrt(np.clip(np.diag(cov_for_opt.values), 0.0, None))
-                    inv_vol = np.where(vol > 0, 1.0 / vol, 0.0)
-                    if float(inv_vol.sum()) > 0:
-                        risk_parity_w = pd.Series(inv_vol / inv_vol.sum(), index=valid_tickers, dtype=float)
-                    else:
-                        risk_parity_w = _equal_weights()
-                except Exception as ee:
-                    warn_msgs.append(f"Risk Parity inverse-vol fallback failed; using equal weights. ({ee})")
-                    risk_parity_w = _equal_weights()
+            except Exception:
+                risk_parity_w = _zero_weights()
 
         # 3) Black-Litterman (market-implied prior returns only; no views/Q)
         bl_w = _zero_weights()
@@ -1727,45 +1735,32 @@ with tab_opt:
                 ef_bl = EfficientFrontier(implied_rets, cov_for_opt)
                 ef_bl.max_sharpe(risk_free_rate=rf)
                 bl_w = pd.Series(ef_bl.clean_weights(), dtype=float)
-            except Exception as e:
-                warn_msgs.append(f"Black-Litterman implied-return optimization failed; using Max Sharpe fallback. ({e})")
+            except Exception:
                 bl_w = max_sharpe_w.copy()
         else:
             bl_w = max_sharpe_w.copy()
 
-        # 4) Min CVaR with mathematical fallback chain
+        # 4) Min CVaR with silent fallback
+        # Flow: Library -> Scipy Semi-Variance -> 0.0
         tail_col_name = "Min CVaR"
         tail_w = _zero_weights()
-
         if EfficientCVaR is not None:
             try:
                 ecvar = EfficientCVaR(exp_ret, asset_returns)
                 ecvar.min_cvar()
                 tail_w = pd.Series(ecvar.clean_weights(), dtype=float)
-            except Exception as e:
-                warn_msgs.append(f"EfficientCVaR failed; trying semi-variance optimizer fallback. ({e})")
-
-        if float(tail_w.sum()) <= 0:
+            except Exception:
+                try:
+                    tail_w = calculate_min_semivariance_weights(asset_returns)
+                    tail_col_name = "Min Semi-Variance (Fallback)"
+                except Exception:
+                    tail_w = _zero_weights()
+        else:
             try:
                 tail_w = calculate_min_semivariance_weights(asset_returns)
                 tail_col_name = "Min Semi-Variance (Fallback)"
-            except Exception as e:
-                warn_msgs.append(f"Semi-variance fallback failed; trying Min Volatility fallback. ({e})")
-
-        if float(tail_w.sum()) <= 0 and EfficientFrontier is not None:
-            try:
-                ef_mv = EfficientFrontier(exp_ret, cov_for_opt)
-                ef_mv.min_volatility()
-                tail_w = pd.Series(ef_mv.clean_weights(), dtype=float)
-                tail_col_name = "Min Volatility (Fallback)"
-            except Exception as e:
-                warn_msgs.append(f"Min Volatility fallback failed; using equal weights. ({e})")
-                tail_w = _equal_weights()
-                tail_col_name = "Min Volatility (Fallback)"
-
-        if float(tail_w.sum()) <= 0:
-            tail_w = _equal_weights()
-            tail_col_name = "Min Volatility (Fallback)"
+            except Exception:
+                tail_w = _zero_weights()
 
         current_w = wt.reindex(valid_tickers).fillna(0.0).astype(float)
         max_sharpe_w = _normalize_weights(max_sharpe_w)
@@ -1781,9 +1776,6 @@ with tab_opt:
             "Black-Litterman": bl_w.values,
             tail_col_name: tail_w.values,
         }).sort_values("Current Weight", ascending=False)
-
-        for msg in warn_msgs:
-            st.caption(f"Warning: {msg}")
 
         chart_cols = ["Current Weight", "Max Sharpe", "Risk Parity", "Black-Litterman", tail_col_name]
         chart_colors = {
