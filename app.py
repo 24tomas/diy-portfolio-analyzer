@@ -545,6 +545,14 @@ with st.sidebar:
              "'Buy & Hold' simulates no rebalancing after initial allocation; "
              "'Daily' assumes constant weights (original behavior).",
     )
+    transaction_cost_rate = st.number_input(
+        "Transaction Cost / Slippage (%)",
+        min_value=0.0,
+        max_value=10.0,
+        value=0.10,
+        step=0.01,
+        help="Applied on each periodic rebalance based on portfolio turnover.",
+    ) / 100
 
     fetch_sector_data = st.checkbox(
         "Fetch sector/industry metadata",
@@ -629,6 +637,7 @@ def compute_weights_and_returns(
     shares_dict=None,
     input_mode="Shares",
     weights_dict=None,
+    transaction_cost=0.0,
 ):
     """Compute portfolio returns via a proper backtest simulation.
 
@@ -723,6 +732,17 @@ def compute_weights_and_returns(
             all_values[s:e] = daily_total
             capital = float(daily_total[-1])
 
+            # Apply transaction costs only at actual rebalance points
+            # (i.e., before starting the next segment).
+            if i < (len(seg_starts) - 1) and transaction_cost > 0:
+                end_values = seg_p[-1] * shares
+                end_total = float(np.sum(end_values))
+                if end_total > 0:
+                    drifted_w = end_values / end_total
+                    turnover = float(np.abs(drifted_w - w).sum())
+                    cost_fraction = turnover * float(transaction_cost)
+                    capital *= max(0.0, 1.0 - cost_fraction)
+
         port_value = pd.Series(all_values, index=dates)
         port_ret = port_value.pct_change().dropna()
 
@@ -770,25 +790,81 @@ def download_fama_french() -> pd.DataFrame:
     return ff_df
 
 
-@st.cache_data(show_spinner="\U0001F3E2 Looking up sector data \u2026", ttl=7 * 86400, persist="disk", max_entries=256)
-def get_sector_map(tickers: tuple) -> dict:
+@st.cache_data(show_spinner="\U0001F3E2 Looking up ticker metadata \u2026", ttl=7 * 86400, persist="disk", max_entries=256)
+def get_ticker_metadata(tickers: tuple) -> dict:
     """
-    For each ticker, query yf.Ticker(t).info to retrieve sector and industry.
-    Returns dict: {ticker: {"sector": ..., "industry": ...}}.
+    For each ticker, query yf.Ticker(t).info to retrieve sector, industry,
+    and dividend yield.
+    Returns dict:
+    {ticker: {"sector": ..., "industry": ..., "dividend_yield": ...}}.
     Cached for 7 days. Accepts a tuple (not list) so Streamlit can hash it.
     """
     result = {}
     for t in tickers:
         try:
             info = yf.Ticker(t).info
+            div_y = info.get("trailingAnnualDividendYield", info.get("dividendYield", 0.0))
+            try:
+                div_y = float(div_y) if div_y is not None else 0.0
+            except Exception:
+                div_y = 0.0
+            if (not np.isfinite(div_y)) or (div_y < 0):
+                div_y = 0.0
             result[t] = {
                 "sector": info.get("sector", "Unknown"),
                 "industry": info.get("industry", "Unknown"),
+                "dividend_yield": div_y,
             }
         except Exception:
-            result[t] = {"sector": "Unknown", "industry": "Unknown"}
+            result[t] = {"sector": "Unknown", "industry": "Unknown", "dividend_yield": 0.0}
         time.sleep(0.8)  # slower to lower rate-limit risk for metadata calls
     return result
+
+
+def build_black_litterman_view_matrices(view_rows, tickers):
+    """
+    Convert user-entered Black-Litterman views into Picking Matrix (P)
+    and Views Vector (Q). Supports:
+    - Absolute view: Asset i expected return
+    - Relative view: Asset A outperforms Asset B by spread
+    """
+    idx_map = {t: i for i, t in enumerate(tickers)}
+    n = len(tickers)
+    P_rows, Q_vals, issues = [], [], []
+
+    for i, row in enumerate(view_rows, start=1):
+        view_type = row.get("type")
+        if view_type == "Absolute":
+            ticker = row.get("ticker")
+            q_pct = float(row.get("q_pct", 0.0))
+            if ticker not in idx_map:
+                issues.append(f"View {i}: invalid ticker for absolute view.")
+                continue
+            p = np.zeros(n, dtype=float)
+            p[idx_map[ticker]] = 1.0
+            P_rows.append(p)
+            Q_vals.append(q_pct / 100.0)
+        elif view_type == "Relative":
+            outperform = row.get("outperform")
+            underperform = row.get("underperform")
+            q_pct = float(row.get("q_pct", 0.0))
+            if outperform not in idx_map or underperform not in idx_map:
+                issues.append(f"View {i}: invalid tickers for relative view.")
+                continue
+            if outperform == underperform:
+                issues.append(f"View {i}: outperform and underperform tickers must differ.")
+                continue
+            p = np.zeros(n, dtype=float)
+            p[idx_map[outperform]] = 1.0
+            p[idx_map[underperform]] = -1.0
+            P_rows.append(p)
+            Q_vals.append(q_pct / 100.0)
+        else:
+            issues.append(f"View {i}: unknown view type.")
+
+    if not P_rows:
+        return None, None, issues
+    return np.vstack(P_rows).astype(float), np.array(Q_vals, dtype=float), issues
 
 
 def build_html_report(
@@ -962,15 +1038,21 @@ if fetch_btn:
         st.warning(f"\u26a0\ufe0f  Could not download Fama-French factors: {e}")
         ff_factors = pd.DataFrame()
 
-    # Sector map - cached, only portfolio tickers (not benchmark)
+    # Ticker metadata - cached, only portfolio tickers (not benchmark)
     portfolio_tickers = tuple(sorted(holdings["Ticker"].tolist()))
     if fetch_sector_data:
         try:
-            sector_map = get_sector_map(portfolio_tickers)
+            sector_map = get_ticker_metadata(portfolio_tickers)
         except Exception:
-            sector_map = {t: {"sector": "Unknown", "industry": "Unknown"} for t in portfolio_tickers}
+            sector_map = {
+                t: {"sector": "Unknown", "industry": "Unknown", "dividend_yield": 0.0}
+                for t in portfolio_tickers
+            }
     else:
-        sector_map = {t: {"sector": "Unknown", "industry": "Unknown"} for t in portfolio_tickers}
+        sector_map = {
+            t: {"sector": "Unknown", "industry": "Unknown", "dividend_yield": 0.0}
+            for t in portfolio_tickers
+        }
 
     st.session_state["analysis_ready"] = True
     st.session_state["fetched_all_prices"] = all_prices
@@ -1102,6 +1184,7 @@ port_ret, ind_ret, wt = compute_weights_and_returns(
     shares_dict=optim_shares,
     input_mode=input_mode,
     weights_dict=optim_weights,
+    transaction_cost=transaction_cost_rate,
 )
 bench_ret = prices[bench].pct_change().dropna()
 bench_ret.name = "Benchmark"
@@ -1117,6 +1200,7 @@ if comp_holdings is not None:
         shares_dict=None,
         input_mode="Shares",
         weights_dict=None,
+        transaction_cost=transaction_cost_rate,
     )
     comp_ret.name = comp_name
 
@@ -1147,6 +1231,7 @@ if not stress_prices.empty:
         shares_dict=optim_shares,
         input_mode=input_mode,
         weights_dict=optim_weights,
+        transaction_cost=transaction_cost_rate,
     )
     stress_bench = (
         stress_prices[bench].pct_change().dropna()
@@ -1273,14 +1358,25 @@ if "Target Weight (%)" in disp_fmt.columns:
     disp_fmt["Target Weight (%)"] = disp["Target Weight (%)"].map("{:.2f}%".format)
 st.dataframe(disp_fmt, width='stretch', hide_index=True)
 
-m1, m2, m3, m4, m5 = st.columns(5)
+dividend_yield_est = 0.0
+for t, wgt in wt.items():
+    div_y = sector_map.get(t, {}).get("dividend_yield", 0.0)
+    try:
+        div_y = float(div_y) if div_y is not None else 0.0
+    except Exception:
+        div_y = 0.0
+    if np.isfinite(div_y) and div_y > 0:
+        dividend_yield_est += float(wgt) * div_y
+
+m1, m2, m3, m4, m5, m6 = st.columns(6)
 ann_ret = annualized_return(port_ret)
 b_ann   = annualized_return(bench_ret)
 m1.metric("Ann. Return",     f"{ann_ret:.2%}")
 m2.metric("Ann. Volatility", f"{annualized_vol(port_ret):.2%}")
 m3.metric("Sharpe Ratio",    f"{dynamic_sharpe(port_ret, rf_series):.2f}")
-m4.metric("Max Drawdown",    f"{max_drawdown(port_ret):.2%}")
-m5.metric("vs Benchmark",    f"{ann_ret - b_ann:+.2%}")
+m4.metric("Est. Dividend Yield", f"{dividend_yield_est:.2%}")
+m5.metric("Max Drawdown",    f"{max_drawdown(port_ret):.2%}")
+m6.metric("vs Benchmark",    f"{ann_ret - b_ann:+.2%}")
 
 report_html = build_html_report(
     portfolio_returns=port_ret,
@@ -1769,36 +1865,64 @@ with tab_factor:
     st.divider()
     roll_cov = excess_port.rolling(252).cov(excess_bench)
     roll_var = excess_bench.rolling(252).var()
-    roll_beta = roll_cov / roll_var
+    roll_beta = (roll_cov / roll_var).replace([np.inf, -np.inf], np.nan)
+    roll_port_excess = excess_port.rolling(252).mean()
+    roll_bench_excess = excess_bench.rolling(252).mean()
+    roll_alpha_ann = (roll_port_excess - (roll_beta * roll_bench_excess)) * 252
 
-    st.subheader("Rolling 1-Year Beta (Style Drift)")
-    fig_beta = go.Figure()
-    fig_beta.add_trace(go.Scatter(
-        x=roll_beta.index,
-        y=roll_beta.values,
-        name="Rolling Beta",
-        line=dict(color="#FFA15A", width=2),
-    ))
-    fig_beta.add_hline(
-        y=1.0,
-        line_dash="dash",
-        line_color="#888",
-        annotation_text="Market Beta (1.0)",
+    st.subheader("Rolling 1-Year Beta & Alpha")
+    c_beta, c_alpha = st.columns(2)
+
+    with c_beta:
+        fig_beta = go.Figure()
+        fig_beta.add_trace(go.Scatter(
+            x=roll_beta.index,
+            y=roll_beta.values,
+            name="Rolling Beta",
+            line=dict(color="#FFA15A", width=2),
+        ))
+        fig_beta.add_hline(
+            y=1.0,
+            line_dash="dash",
+            line_color="#888",
+            annotation_text="Market Beta (1.0)",
+        )
+        fig_beta.add_hline(
+            y=0.0,
+            line_dash="dash",
+            line_color="#888",
+            annotation_text="Market Neutral (0.0)",
+        )
+        fig_beta.update_layout(
+            xaxis_title="Date",
+            yaxis_title="Beta",
+            height=350,
+            margin=dict(l=50, r=20, t=30, b=40),
+        )
+        st.plotly_chart(fig_beta, width='stretch')
+
+    with c_alpha:
+        fig_alpha = go.Figure()
+        fig_alpha.add_trace(go.Scatter(
+            x=roll_alpha_ann.index,
+            y=roll_alpha_ann.values,
+            name="Rolling Alpha (Ann.)",
+            line=dict(color="#00CC96", width=2),
+        ))
+        fig_alpha.add_hline(y=0.0, line_dash="dash", line_color="#888")
+        fig_alpha.update_layout(
+            xaxis_title="Date",
+            yaxis_title="Alpha (Annualized)",
+            yaxis_tickformat="+.1%",
+            height=350,
+            margin=dict(l=50, r=20, t=30, b=40),
+        )
+        st.plotly_chart(fig_alpha, width='stretch')
+
+    st.caption(
+        "Rolling Beta tracks style drift versus the benchmark. Rolling Alpha "
+        "shows time-varying excess return generation after accounting for beta."
     )
-    fig_beta.add_hline(
-        y=0.0,
-        line_dash="dash",
-        line_color="#888",
-        annotation_text="Market Neutral (0.0)",
-    )
-    fig_beta.update_layout(
-        xaxis_title="Date",
-        yaxis_title="Beta",
-        height=350,
-        margin=dict(l=50, r=20, t=30, b=40),
-    )
-    st.plotly_chart(fig_beta, width='stretch')
-    st.caption("Shows how the portfolio's market sensitivity has evolved over time. A rising Beta indicates the portfolio is becoming more aggressive/correlated with the market, while a falling Beta suggests it is becoming more defensive or uncorrelated.")
 
     st.divider()
     # ?? Fama-French 5-Factor Model ?????????????????????
@@ -2578,6 +2702,62 @@ with tab_opt:
         cov_for_opt = cov_for_opt.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         cov_for_opt = 0.5 * (cov_for_opt + cov_for_opt.T)
 
+        bl_view_rows = []
+        with st.expander("⚙️ Input Custom Market Views (Black-Litterman)"):
+            st.caption(
+                "Add absolute views (e.g., AAPL expected return 12%) and/or "
+                "relative views (e.g., MSFT outperforms AAPL by 2%)."
+            )
+            bl_view_count = st.number_input(
+                "Number of Custom Views",
+                min_value=0,
+                max_value=20,
+                value=0,
+                step=1,
+                key="bl_view_count",
+            )
+            for i in range(int(bl_view_count)):
+                st.markdown(f"**View {i + 1}**")
+                t_col, a_col, b_col = st.columns([1.0, 1.3, 1.3])
+                view_type = t_col.selectbox(
+                    "Type",
+                    options=["Absolute", "Relative"],
+                    key=f"bl_view_type_{i}",
+                )
+                if view_type == "Absolute":
+                    tkr = a_col.selectbox("Ticker", options=valid_tickers, key=f"bl_abs_ticker_{i}")
+                    q_pct = b_col.number_input(
+                        "Expected Return (%)",
+                        value=8.0,
+                        step=0.25,
+                        key=f"bl_abs_q_{i}",
+                    )
+                    bl_view_rows.append({"type": "Absolute", "ticker": tkr, "q_pct": float(q_pct)})
+                else:
+                    outperform = a_col.selectbox("Outperform", options=valid_tickers, key=f"bl_rel_out_{i}")
+                    underperform = b_col.selectbox("Underperform", options=valid_tickers, key=f"bl_rel_under_{i}")
+                    spread_pct = st.number_input(
+                        f"Outperformance Spread (%) - View {i + 1}",
+                        value=2.0,
+                        step=0.25,
+                        key=f"bl_rel_q_{i}",
+                    )
+                    bl_view_rows.append(
+                        {
+                            "type": "Relative",
+                            "outperform": outperform,
+                            "underperform": underperform,
+                            "q_pct": float(spread_pct),
+                        }
+                    )
+            if int(bl_view_count) > 0:
+                st.caption("Views are converted internally into the Black-Litterman P matrix and Q vector.")
+
+        bl_P, bl_Q, bl_view_issues = build_black_litterman_view_matrices(bl_view_rows, valid_tickers)
+        if bl_view_issues:
+            for msg in bl_view_issues:
+                st.warning(msg)
+
         def _zero_weights() -> pd.Series:
             return pd.Series(0.0, index=valid_tickers, dtype=float)
 
@@ -2710,7 +2890,7 @@ with tab_opt:
             except Exception:
                 risk_parity_w = _zero_weights()
 
-        # 3) Black-Litterman (market-implied prior returns only; no views/Q)
+        # 3) Black-Litterman (market priors + optional user views)
         bl_w = _zero_weights()
         if black_litterman is not None and EfficientFrontier is not None:
             try:
@@ -2726,7 +2906,19 @@ with tab_opt:
                     risk_free_rate=rf_float,
                 )
 
-                ef_bl = EfficientFrontier(implied_rets, cov_for_opt)
+                posterior_rets = implied_rets
+                if bl_P is not None and bl_Q is not None:
+                    bl_model = black_litterman.BlackLittermanModel(
+                        cov_for_opt,
+                        pi=implied_rets,
+                        P=bl_P,
+                        Q=bl_Q,
+                        omega="default",
+                        tau=0.05,
+                    )
+                    posterior_rets = bl_model.bl_returns()
+
+                ef_bl = EfficientFrontier(posterior_rets, cov_for_opt)
                 ef_bl.max_sharpe(risk_free_rate=rf_float)
                 bl_w = pd.Series(ef_bl.clean_weights(), dtype=float)
             except Exception:
