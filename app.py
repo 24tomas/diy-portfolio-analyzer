@@ -63,7 +63,7 @@ st.set_page_config(
 # THEME SYSTEM  (dark / light + CSS + plotly)
 # ──────────────────────────────────────────────
 if "dark_mode" not in st.session_state:
-    st.session_state["dark_mode"] = True   # default: dark
+    st.session_state["dark_mode"] = False   # default: light
 
 
 def _apply_theme():
@@ -78,10 +78,10 @@ def _apply_theme():
         cw = ["#60A5FA","#F87171","#34D399","#A78BFA",
               "#FBBF24","#F472B6","#22D3EE","#A3E635"]
     else:
-        bg      = "#FAF9F6"; sb     = "#F0EDE6"; card   = "#FFFFFF"
-        border  = "#E5E0D6"; text   = "#1A1A1A"; muted  = "#6B6B6B"
-        accent  = "#1A56DB"; plot_bg= "#FFFFFF"; paper  = "#FAF9F6"
-        grid    = "#EDE9E0"; fc     = "#1A1A1A"
+        bg      = "#F6F3ED"; sb     = "#EEE9DF"; card   = "#FCFAF5"
+        border  = "#DDD6C8"; text   = "#1E2430"; muted  = "#6B7280"
+        accent  = "#2F5CD9"; plot_bg= "#FCFAF5"; paper  = "#F6F3ED"
+        grid    = "#E8E2D6"; fc     = "#1E2430"
         cw = ["#2563EB","#DC2626","#16A34A","#7C3AED",
               "#D97706","#DB2777","#0891B2","#65A30D"]
 
@@ -109,9 +109,12 @@ def _apply_theme():
                 font=dict(family="Inter, sans-serif", size=12, color=text),
                 bordercolor=border,
             ),
+            margin=dict(l=50, r=22, t=42, b=40),
         )
     )
     pio.templates.default = "portfolio"
+    px.defaults.template = "portfolio"
+    px.defaults.color_discrete_sequence = cw
 
     # ── CSS injection ──
     st.markdown(f"""<style>
@@ -138,6 +141,8 @@ p,li,label,span,[data-testid="stMarkdown"]{{color:{text}!important;}}
 [data-testid="stSidebar"]{{
   background:{sb}!important;border-right:1px solid {border}!important;}}
 [data-testid="stSidebar"] *{{color:{text}!important;}}
+[data-testid="stSidebarNav"]{{display:none!important;}}
+[data-testid="stSidebarHeader"]{{padding-top:0.4rem!important;}}
 [data-testid="stSidebar"] h1,
 [data-testid="stSidebar"] h2,
 [data-testid="stSidebar"] h3{{
@@ -190,6 +195,8 @@ p,li,label,span,[data-testid="stMarkdown"]{{color:{text}!important;}}
 .stTextInput>div>div>input,.stNumberInput>div>div>input{{
   background:{card}!important;border:1.5px solid {border}!important;
   border-radius:8px!important;color:{text}!important;font-size:0.875rem!important;}}
+[data-baseweb="input"] input{{
+  background:{card}!important;color:{text}!important;}}
 .stTextInput>div>div>input::placeholder{{color:{muted}!important;}}
 [data-baseweb="select"]>div{{
   background:{card}!important;border:1.5px solid {border}!important;
@@ -205,7 +212,8 @@ p,li,label,span,[data-testid="stMarkdown"]{{color:{text}!important;}}
 /* ── PLOTLY CONTAINER ── */
 [data-testid="stPlotlyChart"]{{
   border-radius:12px!important;border:1px solid {border}!important;
-  overflow:hidden!important;background:{card}!important;}}
+  overflow:hidden!important;background:{card}!important;
+  box-shadow:0 2px 8px rgba(0,0,0,0.04)!important;}}
 
 /* ── DATAFRAME ── */
 .stDataFrame{{
