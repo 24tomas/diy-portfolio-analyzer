@@ -49,6 +49,13 @@ except Exception:
     sp_opt = None
     HAS_SCIPY_OPT = False
 
+# Force Plotly figures to use app templates/colors instead of Streamlit's global theme.
+_ORIG_ST_PLOTLY_CHART = st.plotly_chart
+def _plotly_chart_no_streamlit_theme(*args, **kwargs):
+    kwargs.setdefault("theme", None)
+    return _ORIG_ST_PLOTLY_CHART(*args, **kwargs)
+st.plotly_chart = _plotly_chart_no_streamlit_theme
+
 # ??????????????????????????????????????????????
 # 1. PAGE CONFIG
 # ??????????????????????????????????????????????
@@ -142,7 +149,9 @@ p,li,label,span,[data-testid="stMarkdown"]{{color:{text}!important;}}
   background:{sb}!important;border-right:1px solid {border}!important;}}
 [data-testid="stSidebar"] *{{color:{text}!important;}}
 [data-testid="stSidebarNav"]{{display:none!important;}}
-[data-testid="stSidebarHeader"]{{padding-top:0.4rem!important;}}
+[data-testid="stSidebarHeader"]{{
+  min-height:0!important;padding:0!important;margin:0!important;}}
+[data-testid="stSidebarHeader"] a{{display:none!important;}}
 [data-testid="stSidebar"] h1,
 [data-testid="stSidebar"] h2,
 [data-testid="stSidebar"] h3{{
