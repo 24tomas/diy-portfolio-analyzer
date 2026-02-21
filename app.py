@@ -49,13 +49,10 @@ except Exception:
     sp_opt = None
     HAS_SCIPY_OPT = False
 
-# Force Plotly figures to use app templates/colors instead of Streamlit's global theme.
+# Keep chart rendering on Streamlit's native dark theme.
 _ORIG_ST_PLOTLY_CHART = st.plotly_chart
 def _plotly_chart_no_streamlit_theme(*args, **kwargs):
-    # Keep Streamlit's native chart behaviour in dark mode,
-    # but use custom light-mode colors/template when dark mode is off.
-    dm = st.session_state.get("dark_mode", False)
-    kwargs.setdefault("theme", "streamlit" if dm else None)
+    kwargs.setdefault("theme", "streamlit")
     return _ORIG_ST_PLOTLY_CHART(*args, **kwargs)
 st.plotly_chart = _plotly_chart_no_streamlit_theme
 
@@ -72,8 +69,8 @@ st.set_page_config(
 # ──────────────────────────────────────────────
 # THEME SYSTEM  (dark / light + CSS + plotly)
 # ──────────────────────────────────────────────
-if "dark_mode" not in st.session_state:
-    st.session_state["dark_mode"] = False   # default: light
+# Dark mode is enforced (light mode removed).
+st.session_state["dark_mode"] = True
 
 
 def _apply_theme():
@@ -282,17 +279,6 @@ if "analysis_ready" not in st.session_state:
 # 3. SIDEBAR
 # ??????????????????????????????????????????????
 with st.sidebar:
-
-    # ── Theme toggle ──────────────────────────────────
-    _is_dark = st.toggle(
-        "Dark mode",
-        value=st.session_state.get("dark_mode", True),
-        key="_theme_toggle",
-    )
-    if _is_dark != st.session_state.get("dark_mode", True):
-        st.session_state["dark_mode"] = _is_dark
-        st.rerun()
-
     st.divider()
 
     # ?? 3a. Portfolio manager ?????????????????????????
