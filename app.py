@@ -16,6 +16,7 @@ import time
 import random
 import json
 import os
+import plotly.io as pio
 from datetime import date, timedelta
 try:
     import pypfopt
@@ -58,9 +59,185 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ??????????????????????????????????????????????
+# ──────────────────────────────────────────────
+# THEME SYSTEM  (dark / light + CSS + plotly)
+# ──────────────────────────────────────────────
+if "dark_mode" not in st.session_state:
+    st.session_state["dark_mode"] = True   # default: dark
+
+
+def _apply_theme():
+    dm = st.session_state["dark_mode"]
+
+    # ── colour palette ──
+    if dm:
+        bg      = "#0C0C0C"; sb     = "#111111"; card   = "#1A1A1A"
+        border  = "#2A2A2A"; text   = "#EFEFEF"; muted  = "#888888"
+        accent  = "#3B82F6"; plot_bg= "#161616"; paper  = "#0C0C0C"
+        grid    = "#212121"; fc     = "#D0D0D0"
+        cw = ["#60A5FA","#F87171","#34D399","#A78BFA",
+              "#FBBF24","#F472B6","#22D3EE","#A3E635"]
+    else:
+        bg      = "#FAF9F6"; sb     = "#F0EDE6"; card   = "#FFFFFF"
+        border  = "#E5E0D6"; text   = "#1A1A1A"; muted  = "#6B6B6B"
+        accent  = "#1A56DB"; plot_bg= "#FFFFFF"; paper  = "#FAF9F6"
+        grid    = "#EDE9E0"; fc     = "#1A1A1A"
+        cw = ["#2563EB","#DC2626","#16A34A","#7C3AED",
+              "#D97706","#DB2777","#0891B2","#65A30D"]
+
+    # ── plotly template ──
+    pio.templates["portfolio"] = go.layout.Template(
+        layout=go.Layout(
+            paper_bgcolor=paper,
+            plot_bgcolor=plot_bg,
+            font=dict(family="Inter, -apple-system, sans-serif", color=fc, size=12),
+            colorway=cw,
+            xaxis=dict(
+                gridcolor=grid, linecolor=border, zerolinecolor=grid,
+                tickfont=dict(size=11, color=fc), title_font=dict(color=fc),
+            ),
+            yaxis=dict(
+                gridcolor=grid, linecolor=border, zerolinecolor=grid,
+                tickfont=dict(size=11, color=fc), title_font=dict(color=fc),
+            ),
+            legend=dict(
+                bgcolor="rgba(0,0,0,0)", font=dict(size=12, color=fc),
+                bordercolor=border,
+            ),
+            hoverlabel=dict(
+                bgcolor=card,
+                font=dict(family="Inter, sans-serif", size=12, color=text),
+                bordercolor=border,
+            ),
+        )
+    )
+    pio.templates.default = "portfolio"
+
+    # ── CSS injection ──
+    st.markdown(f"""<style>
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400;1,700&family=Inter:wght@300;400;500;600;700&display=swap');
+
+/* ── BASE ── */
+html,body{{background:{bg}!important;color:{text}!important;}}
+.stApp,[data-testid="stAppViewContainer"],[data-testid="stMain"],
+section.main,.block-container{{background:{bg}!important;}}
+[data-testid="stHeader"]{{background:{bg}!important;border-bottom:1px solid {border}!important;}}
+
+/* ── TYPOGRAPHY ── */
+*{{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif!important;}}
+h1,h2,h3,.stMarkdown h1,.stMarkdown h2,.stMarkdown h3{{
+  font-family:'Playfair Display',Georgia,serif!important;
+  font-weight:700!important;letter-spacing:-0.025em!important;
+  color:{text}!important;line-height:1.15!important;}}
+h1{{font-size:2.6rem!important;margin-bottom:0.3rem!important;}}
+h2{{font-size:1.75rem!important;}}
+h3{{font-size:1.2rem!important;}}
+p,li,label,span,[data-testid="stMarkdown"]{{color:{text}!important;}}
+
+/* ── SIDEBAR ── */
+[data-testid="stSidebar"]{{
+  background:{sb}!important;border-right:1px solid {border}!important;}}
+[data-testid="stSidebar"] *{{color:{text}!important;}}
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3{{
+  font-family:'Inter',sans-serif!important;font-size:0.7rem!important;
+  font-weight:700!important;text-transform:uppercase!important;
+  letter-spacing:0.12em!important;color:{muted}!important;}}
+
+/* ── METRIC CARDS ── */
+[data-testid="metric-container"]{{
+  background:{card}!important;border:1px solid {border}!important;
+  border-radius:14px!important;padding:20px 22px!important;}}
+[data-testid="stMetricLabel"]>div{{
+  font-size:0.68rem!important;font-weight:600!important;
+  text-transform:uppercase!important;letter-spacing:0.11em!important;
+  color:{muted}!important;font-family:'Inter',sans-serif!important;}}
+[data-testid="stMetricValue"]>div{{
+  font-family:'Playfair Display',serif!important;
+  font-size:1.9rem!important;font-weight:700!important;color:{text}!important;}}
+[data-testid="stMetricDelta"]>div{{
+  font-size:0.78rem!important;font-weight:500!important;}}
+
+/* ── TABS ── */
+[data-testid="stTabs"] [data-baseweb="tab-list"]{{
+  background:transparent!important;
+  border-bottom:2px solid {border}!important;gap:0!important;padding:0!important;}}
+[data-testid="stTabs"] [data-baseweb="tab"]{{
+  font-size:0.78rem!important;font-weight:500!important;color:{muted}!important;
+  background:transparent!important;border:none!important;
+  padding:10px 14px!important;letter-spacing:0.01em!important;
+  transition:color 0.15s!important;}}
+[data-testid="stTabs"] [aria-selected="true"]{{
+  color:{accent}!important;border-bottom:2px solid {accent}!important;
+  margin-bottom:-2px!important;font-weight:600!important;}}
+[data-testid="stTabs"] [data-baseweb="tab-highlight"]{{
+  background-color:{accent}!important;height:2px!important;}}
+
+/* ── BUTTONS ── */
+.stButton>button{{
+  font-size:0.85rem!important;font-weight:500!important;
+  border-radius:8px!important;border:1.5px solid {border}!important;
+  background:transparent!important;color:{text}!important;
+  transition:all 0.15s!important;letter-spacing:0.01em!important;}}
+.stButton>button:hover{{border-color:{accent}!important;color:{accent}!important;}}
+.stButton>button[kind="primary"]{{
+  background:{accent}!important;border-color:{accent}!important;
+  color:#fff!important;font-weight:600!important;}}
+.stButton>button[kind="primary"]:hover{{opacity:0.88!important;color:#fff!important;}}
+
+/* ── INPUTS ── */
+.stTextInput>div>div>input,.stNumberInput>div>div>input{{
+  background:{card}!important;border:1.5px solid {border}!important;
+  border-radius:8px!important;color:{text}!important;font-size:0.875rem!important;}}
+.stTextInput>div>div>input::placeholder{{color:{muted}!important;}}
+[data-baseweb="select"]>div{{
+  background:{card}!important;border:1.5px solid {border}!important;
+  border-radius:8px!important;color:{text}!important;}}
+[data-baseweb="popover"],[data-baseweb="menu"]{{
+  background:{card}!important;border:1px solid {border}!important;
+  border-radius:10px!important;}}
+
+/* ── SLIDER ── */
+[data-testid="stSlider"] [data-baseweb="slider"] [role="slider"]{{
+  background:{accent}!important;}}
+
+/* ── PLOTLY CONTAINER ── */
+[data-testid="stPlotlyChart"]{{
+  border-radius:12px!important;border:1px solid {border}!important;
+  overflow:hidden!important;background:{card}!important;}}
+
+/* ── DATAFRAME ── */
+.stDataFrame{{
+  border-radius:12px!important;border:1px solid {border}!important;
+  overflow:hidden!important;}}
+
+/* ── ALERTS ── */
+[data-testid="stAlert"]{{border-radius:10px!important;}}
+
+/* ── DIVIDER ── */
+hr{{border-color:{border}!important;margin:2.5rem 0!important;opacity:1!important;}}
+
+/* ── CAPTION ── */
+.stCaption p,[data-testid="stCaptionContainer"] p{{
+  color:{muted}!important;font-size:0.78rem!important;}}
+
+/* ── CHECKBOX / TOGGLE ── */
+[data-testid="stToggle"] span{{color:{text}!important;}}
+
+/* ── SCROLLBAR ── */
+::-webkit-scrollbar{{width:5px;height:5px;}}
+::-webkit-scrollbar-track{{background:transparent;}}
+::-webkit-scrollbar-thumb{{background:{border};border-radius:3px;}}
+::-webkit-scrollbar-thumb:hover{{background:{muted};}}
+</style>""", unsafe_allow_html=True)
+
+
+_apply_theme()
+
+# ──────────────────────────────────────────────
 # 2. PORTFOLIO STORAGE (JSON file on disk)
-# ??????????????????????????????????????????????
+# ──────────────────────────────────────────────
 PORTFOLIO_FILE = "saved_portfolios.json"
 STRESS_START_DATE = date(2007, 1, 1)
 
@@ -84,6 +261,18 @@ if "analysis_ready" not in st.session_state:
 # 3. SIDEBAR
 # ??????????????????????????????????????????????
 with st.sidebar:
+
+    # ── Theme toggle ──────────────────────────────────
+    _is_dark = st.toggle(
+        "Dark mode",
+        value=st.session_state.get("dark_mode", True),
+        key="_theme_toggle",
+    )
+    if _is_dark != st.session_state.get("dark_mode", True):
+        st.session_state["dark_mode"] = _is_dark
+        st.rerun()
+
+    st.divider()
 
     # ?? 3a. Portfolio manager ?????????????????????????
     st.header("\U0001F4BE Portfolio Manager")
@@ -523,7 +712,24 @@ def get_sector_map(tickers: tuple) -> dict:
 # ??????????????????????????????????????????????
 # 5. MAIN ? RUN ON BUTTON CLICK
 # ??????????????????????????????????????????????
-st.title("\U0001F4CA Portfolio Analysis Dashboard")
+_title_text = st.session_state.get("dark_mode", True) and "#EFEFEF" or "#1A1A1A"
+_title_muted = "#888888" if st.session_state.get("dark_mode", True) else "#6B6B6B"
+st.markdown(f"""
+<div style="padding:2rem 0 1.5rem 0;">
+  <div style="font-family:'Inter',sans-serif;font-size:0.7rem;font-weight:700;
+              letter-spacing:0.15em;text-transform:uppercase;color:{_title_muted};
+              margin-bottom:0.75rem;">Investment Dashboard</div>
+  <h1 style="font-family:'Playfair Display',Georgia,serif;font-size:3rem;
+             font-weight:700;letter-spacing:-0.03em;line-height:1.05;
+             color:{_title_text};margin:0 0 0.5rem 0;">
+    Portfolio <em>Analysis</em>
+  </h1>
+  <p style="font-family:'Inter',sans-serif;font-size:0.85rem;color:{_title_muted};
+            font-weight:400;margin:0;letter-spacing:0.02em;">
+    Multi-factor backtesting · Risk decomposition · Monte Carlo simulation
+  </p>
+</div>
+""", unsafe_allow_html=True)
 
 if fetch_btn:
     if end_date <= start_date:
