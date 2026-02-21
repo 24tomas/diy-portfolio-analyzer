@@ -17,6 +17,7 @@ import random
 import json
 import os
 import plotly.io as pio
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 try:
     import pypfopt
@@ -810,10 +811,13 @@ def get_ticker_metadata(tickers: tuple) -> dict:
     {ticker: {"sector": ..., "industry": ..., "dividend_yield": ...}}.
     Cached for 7 days. Accepts a tuple (not list) so Streamlit can hash it.
     """
-    result = {}
-    for t in tickers:
+    default_meta = {"sector": "Unknown", "industry": "Unknown", "dividend_yield": 0.0}
+
+    def _worker(ticker: str):
+        # Small jitter to reduce synchronized bursts against Yahoo.
+        time.sleep(random.uniform(0.1, 0.5))
         try:
-            info = yf.Ticker(t).info
+            info = yf.Ticker(ticker).info
             div_y = info.get("trailingAnnualDividendYield", info.get("dividendYield", 0.0))
             if div_y is None:
                 div_rate = info.get("trailingAnnualDividendRate", info.get("dividendRate"))
@@ -829,28 +833,40 @@ def get_ticker_metadata(tickers: tuple) -> dict:
                 div_y = 0.0
             if (not np.isfinite(div_y)) or (div_y < 0):
                 div_y = 0.0
-            # Some feeds return percentage points (e.g., 2.5) instead of decimals (0.025).
             if div_y > 1.0:
                 div_y = div_y / 100.0
-            result[t] = {
+            return ticker, {
                 "sector": info.get("sector", "Unknown"),
                 "industry": info.get("industry", "Unknown"),
                 "dividend_yield": div_y,
             }
         except Exception:
-            result[t] = {"sector": "Unknown", "industry": "Unknown", "dividend_yield": 0.0}
-        time.sleep(0.8)  # slower to lower rate-limit risk for metadata calls
+            return ticker, default_meta.copy()
+
+    result = {}
+    max_workers = min(8, max(1, len(tickers)))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_worker, t) for t in tickers]
+        for fut in as_completed(futures):
+            try:
+                t, meta = fut.result()
+            except Exception:
+                continue
+            result[t] = meta
+
+    for t in tickers:
+        result.setdefault(t, default_meta.copy())
     return result
 
 
 @st.cache_data(show_spinner=False, ttl=7 * 86400, persist="disk", max_entries=256)
 def get_dividend_yields(tickers: tuple) -> dict:
     """Fetch dividend yields with lightweight fallbacks, even when sector metadata is off."""
-    out = {}
-    for t in tickers:
+    def _worker(ticker: str):
+        time.sleep(random.uniform(0.1, 0.4))
         div_y = 0.0
         try:
-            tk = yf.Ticker(t)
+            tk = yf.Ticker(ticker)
             fast = getattr(tk, "fast_info", {}) or {}
             div_y = fast.get("dividendYield")
             if div_y is None:
@@ -869,8 +885,20 @@ def get_dividend_yields(tickers: tuple) -> dict:
             div_y = 0.0
         if div_y > 1.0:
             div_y = div_y / 100.0
-        out[t] = div_y
-        time.sleep(0.2)
+        return ticker, div_y
+
+    out = {}
+    max_workers = min(8, max(1, len(tickers)))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_worker, t) for t in tickers]
+        for fut in as_completed(futures):
+            try:
+                t, y = fut.result()
+            except Exception:
+                continue
+            out[t] = y
+    for t in tickers:
+        out.setdefault(t, 0.0)
     return out
 
 
@@ -1466,6 +1494,8 @@ st.divider()
 # ??????????????????????????????????????????????
 # 7. TABS
 # ??????????????????????????????????????????????
+asset_count_for_ui = len([t for t in wt.index if t in prices.columns])
+compact_legends = asset_count_for_ui > 15
 tab_perf, tab_risk, tab_factor, tab_dd, tab_stress, tab_opt, tab_mc = st.tabs(
     ["\U0001F4C8 Performance", "\u2696\ufe0f Risk & Concentration", "\U0001F52C Factor Exposure",
      "\U0001F4C9 Drawdowns", "\U0001F9EA Stress Tests", "\U0001F3AF Optimization", "\U0001F3B2 Monte Carlo"]
@@ -1497,6 +1527,7 @@ with tab_perf:
                                    line=dict(color="#00CC96", width=2, dash="dash")))
     fig_g.update_layout(yaxis_title="Growth of $1", yaxis_tickprefix="$",
                         yaxis_tickformat=".2f",
+                        showlegend=not compact_legends,
                         legend=dict(orientation="h", y=1.02, x=0),
                         margin=dict(l=50, r=20, t=40, b=40), height=460,
                         hovermode="x unified")
@@ -1635,6 +1666,7 @@ with tab_risk:
 
     valid_tickers = [t for t in wt.index if t in prices.columns]
     w_arr = wt[valid_tickers].values
+    many_tickers = len(valid_tickers) > 15
 
     # ?? 1. HHI (Herfindahl-Hirschman Index) ?????????????
     st.subheader("Portfolio Concentration ? HHI")
@@ -1675,8 +1707,15 @@ with tab_risk:
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("Weight Allocation")
-        # Sorted bar chart instead of pie ? easier to read with many holdings
-        wt_sorted = wt[valid_tickers].sort_values(ascending=True)
+        # Chart-only aggregation for readability on large portfolios.
+        wt_full = wt[valid_tickers].astype(float).copy()
+        wt_chart = wt_full.copy()
+        if many_tickers:
+            small = wt_chart[wt_chart < 0.015]
+            wt_chart = wt_chart[wt_chart >= 0.015]
+            if float(small.sum()) > 0:
+                wt_chart.loc["Others"] = float(small.sum())
+        wt_sorted = wt_chart.sort_values(ascending=True)
         fig_bar_w = go.Figure(go.Bar(
             x=wt_sorted.values, y=wt_sorted.index, orientation="h",
             text=[f"{v:.1%}" for v in wt_sorted.values],
@@ -1686,7 +1725,7 @@ with tab_risk:
         fig_bar_w.update_layout(
             xaxis_tickformat=".0%", xaxis_title="Weight",
             margin=dict(l=20, r=20, t=20, b=40),
-            height=max(300, len(wt_sorted) * 36),
+            height=max(320, len(wt_sorted) * 32),
         )
         st.plotly_chart(fig_bar_w, width='stretch')
 
@@ -1801,10 +1840,11 @@ with tab_risk:
         z=cov_matrix.values,
         x=cov_matrix.columns, y=cov_matrix.index,
         colorscale="Blues", zmid=None,
-        text=np.round(cov_matrix.values, 4), texttemplate="%{text}",
+        text=(np.round(cov_matrix.values, 4) if not many_tickers else None),
+        texttemplate=("%{text}" if not many_tickers else None),
         hovertemplate="%{y} / %{x}<br>Cov: %{z:.4f}<extra></extra>",
     ))
-    fig_cov.update_layout(height=max(350, len(valid_tickers) * 55),
+    fig_cov.update_layout(height=max(400, len(valid_tickers) * 20),
                           margin=dict(l=40, r=20, t=20, b=40))
     st.plotly_chart(fig_cov, width='stretch')
 
@@ -1814,9 +1854,10 @@ with tab_risk:
     fig_corr = go.Figure(data=go.Heatmap(
         z=corr.values, x=corr.columns, y=corr.index,
         colorscale="RdBu_r", zmid=0,
-        text=np.round(corr.values, 2), texttemplate="%{text}",
+        text=(np.round(corr.values, 2) if not many_tickers else None),
+        texttemplate=("%{text}" if not many_tickers else None),
         zmin=-1, zmax=1))
-    fig_corr.update_layout(height=max(350, len(valid_tickers) * 55),
+    fig_corr.update_layout(height=max(400, len(valid_tickers) * 20),
                            margin=dict(l=40, r=20, t=20, b=40))
     st.plotly_chart(fig_corr, width='stretch')
 
@@ -1845,23 +1886,40 @@ with tab_risk:
         "% of Risk": pct_ctr,
     }).sort_values("% of Risk", ascending=True)
 
+    # Chart-only aggregation for readability on large portfolios.
+    risk_chart_df = risk_df.copy()
+    if many_tickers:
+        small_mask = (risk_chart_df["Weight"] < 0.015) & (risk_chart_df["% of Risk"] < 0.015)
+        if small_mask.any():
+            others_row = pd.DataFrame(
+                {
+                    "Ticker": ["Others"],
+                    "Weight": [float(risk_chart_df.loc[small_mask, "Weight"].sum())],
+                    "MCR": [np.nan],
+                    "Risk Contribution": [float(risk_chart_df.loc[small_mask, "Risk Contribution"].sum())],
+                    "% of Risk": [float(risk_chart_df.loc[small_mask, "% of Risk"].sum())],
+                }
+            )
+            risk_chart_df = pd.concat([risk_chart_df.loc[~small_mask], others_row], ignore_index=True)
+    risk_chart_df = risk_chart_df.sort_values("% of Risk", ascending=True)
+
     # Bar chart ? weight vs risk contribution side by side
     fig_mcr = go.Figure()
     fig_mcr.add_trace(go.Bar(
-        y=risk_df["Ticker"], x=risk_df["Weight"], name="Weight",
+        y=risk_chart_df["Ticker"], x=risk_chart_df["Weight"], name="Weight",
         orientation="h", marker_color="#636EFA",
-        text=[f"{v:.1%}" for v in risk_df["Weight"]], textposition="auto",
+        text=[f"{v:.1%}" for v in risk_chart_df["Weight"]], textposition="auto",
     ))
     fig_mcr.add_trace(go.Bar(
-        y=risk_df["Ticker"], x=risk_df["% of Risk"], name="% of Risk",
+        y=risk_chart_df["Ticker"], x=risk_chart_df["% of Risk"], name="% of Risk",
         orientation="h", marker_color="#EF553B",
-        text=[f"{v:.1%}" for v in risk_df["% of Risk"]], textposition="auto",
+        text=[f"{v:.1%}" for v in risk_chart_df["% of Risk"]], textposition="auto",
     ))
     fig_mcr.update_layout(
         barmode="group", xaxis_tickformat=".0%",
         xaxis_title="Proportion",
         legend=dict(orientation="h", y=1.02, x=0),
-        height=max(320, len(risk_df) * 45),
+        height=max(320, len(risk_chart_df) * 42),
         margin=dict(l=20, r=20, t=40, b=40),
     )
     st.plotly_chart(fig_mcr, width='stretch')
@@ -3033,11 +3091,16 @@ with tab_opt:
             tail_col_name: "#FFA15A",
         }
 
+        # Visualization-only noise filter: keep assets with any strategy weight > 0.5%.
+        plot_opt_df = opt_df.loc[opt_df[chart_cols].max(axis=1) > 0.005].copy()
+        if plot_opt_df.empty:
+            plot_opt_df = opt_df.head(min(len(opt_df), 20)).copy()
+
         fig_opt = go.Figure()
         for col in chart_cols:
             fig_opt.add_trace(go.Bar(
-                x=opt_df["Ticker"],
-                y=opt_df[col],
+                x=plot_opt_df["Ticker"],
+                y=plot_opt_df[col],
                 name=col,
                 marker_color=chart_colors.get(col, "#888888"),
             ))
@@ -3049,7 +3112,7 @@ with tab_opt:
             yaxis_tickformat=".0%",
             legend=dict(orientation="h", y=1.06, x=0),
             margin=dict(l=40, r=20, t=40, b=40),
-            height=max(560, 360 + len(opt_df) * 26),
+            height=max(520, 320 + len(plot_opt_df) * 28),
             hovermode="x unified",
         )
         st.plotly_chart(fig_opt, width='stretch')
@@ -3188,6 +3251,7 @@ with tab_mc:
                 yaxis_title="Portfolio Value",
                 yaxis_tickprefix="$",
                 yaxis_tickformat=",.0f",
+                showlegend=not compact_legends,
                 margin=dict(l=50, r=20, t=50, b=40),
                 legend=dict(orientation="h", y=1.02, x=0),
                 height=520,
