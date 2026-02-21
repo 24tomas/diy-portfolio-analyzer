@@ -702,12 +702,26 @@ with tab_perf:
     k2.metric("CAGR",         f"{qs_cagr:.2%}",  delta=f"{qs_cagr - b_cagr:+.2%} vs {bench}")
     k3.metric("Ann. Vol.",    f"{qs_vol:.2%}",    delta=f"{qs_vol - b_vol:+.2%} vs {bench}",
               delta_color="inverse")
+    up_cap = qs.stats.up_capture(port_ret, bench_ret)
+    down_cap = qs.stats.down_capture(port_ret, bench_ret)
     k4, k5, k6 = st.columns(3)
     k4.metric("Sharpe Ratio",      f"{qs_sharpe:.2f}")
     k5.metric("Information Ratio", f"{qs_info:.2f}",
               help="> 0.5 is good, > 1.0 is excellent.")
     k6.metric("Sortino Ratio",     f"{qs.stats.sortino(port_ret):.2f}",
               help="Like Sharpe but only penalises downside volatility.")
+    k7, k8 = st.columns(2)
+    k7.metric(
+        "Up Capture Ratio", 
+        f"{up_cap:.2f}", 
+        help="> 1.0 is excellent. Shows the portfolio's participation in benchmark gains."
+    )
+    k8.metric(
+        "Down Capture Ratio", 
+        f"{down_cap:.2f}", 
+        help="< 1.0 is excellent. Shows the portfolio's participation in benchmark losses.",
+        delta_color="inverse"
+    )
 
     # Detailed stats table
     st.subheader("Detailed Statistics")
@@ -726,6 +740,8 @@ with tab_perf:
         ("Profit Factor",   f"{qs.stats.profit_factor(port_ret):.2f}", f"{qs.stats.profit_factor(bench_ret):.2f}"),
         ("Skew",            f"{qs.stats.skew(port_ret):.2f}",     f"{qs.stats.skew(bench_ret):.2f}"),
         ("Kurtosis",        f"{qs.stats.kurtosis(port_ret):.2f}", f"{qs.stats.kurtosis(bench_ret):.2f}"),
+        ("Up Capture Ratio", f"{up_cap:.2f}", "1.00"),
+        ("Down Capture Ratio", f"{down_cap:.2f}", "1.00"),
     ]
     cols = {"Metric": [], "Portfolio": [], f"Benchmark ({bench})": []}
     if comp_ret is not None:
@@ -749,6 +765,8 @@ with tab_perf:
                 "Profit Factor": lambda: f"{qs.stats.profit_factor(comp_ret):.2f}",
                 "Skew": lambda: f"{qs.stats.skew(comp_ret):.2f}",
                 "Kurtosis": lambda: f"{qs.stats.kurtosis(comp_ret):.2f}",
+                "Up Capture Ratio": lambda: f"{qs.stats.up_capture(comp_ret, bench_ret):.2f}",
+                "Down Capture Ratio": lambda: f"{qs.stats.down_capture(comp_ret, bench_ret):.2f}",
             }
             cols[comp_name].append(fn_map.get(metric, lambda: "?")())
     st.dataframe(pd.DataFrame(cols).set_index("Metric"), width='stretch')
