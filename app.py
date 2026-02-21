@@ -135,6 +135,18 @@ section.main,.block-container{{background:{bg}!important;}}
 
 /* ── TYPOGRAPHY ── */
 *{{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif!important;}}
+/* Preserve icon ligatures used by Streamlit widgets (expander arrows, +/- icons). */
+.material-icons,
+.material-symbols-outlined,
+.material-symbols-rounded,
+[class^="material-symbols"],
+[class*=" material-symbols"]{{
+  font-family:'Material Symbols Rounded','Material Symbols Outlined','Material Icons'!important;
+  font-weight:normal!important;
+  font-style:normal!important;
+  letter-spacing:normal!important;
+  text-transform:none!important;
+}}
 h1,h2,h3,.stMarkdown h1,.stMarkdown h2,.stMarkdown h3{{
   font-family:'Playfair Display',Georgia,serif!important;
   font-weight:700!important;letter-spacing:-0.025em!important;
@@ -396,7 +408,6 @@ with st.sidebar:
                 ignore_index=True,
             )
             st.session_state["analysis_ready"] = False
-            st.session_state["new_ticker_input"] = ""
             st.success(f"Added {new_ticker} with 10 shares.")
             st.rerun()
 
@@ -804,12 +815,23 @@ def get_ticker_metadata(tickers: tuple) -> dict:
         try:
             info = yf.Ticker(t).info
             div_y = info.get("trailingAnnualDividendYield", info.get("dividendYield", 0.0))
+            if div_y is None:
+                div_rate = info.get("trailingAnnualDividendRate", info.get("dividendRate"))
+                px = info.get("currentPrice", info.get("regularMarketPrice", info.get("previousClose")))
+                try:
+                    if div_rate is not None and px not in (None, 0):
+                        div_y = float(div_rate) / float(px)
+                except Exception:
+                    div_y = 0.0
             try:
                 div_y = float(div_y) if div_y is not None else 0.0
             except Exception:
                 div_y = 0.0
             if (not np.isfinite(div_y)) or (div_y < 0):
                 div_y = 0.0
+            # Some feeds return percentage points (e.g., 2.5) instead of decimals (0.025).
+            if div_y > 1.0:
+                div_y = div_y / 100.0
             result[t] = {
                 "sector": info.get("sector", "Unknown"),
                 "industry": info.get("industry", "Unknown"),
@@ -819,6 +841,37 @@ def get_ticker_metadata(tickers: tuple) -> dict:
             result[t] = {"sector": "Unknown", "industry": "Unknown", "dividend_yield": 0.0}
         time.sleep(0.8)  # slower to lower rate-limit risk for metadata calls
     return result
+
+
+@st.cache_data(show_spinner=False, ttl=7 * 86400, persist="disk", max_entries=256)
+def get_dividend_yields(tickers: tuple) -> dict:
+    """Fetch dividend yields with lightweight fallbacks, even when sector metadata is off."""
+    out = {}
+    for t in tickers:
+        div_y = 0.0
+        try:
+            tk = yf.Ticker(t)
+            fast = getattr(tk, "fast_info", {}) or {}
+            div_y = fast.get("dividendYield")
+            if div_y is None:
+                info = tk.info
+                div_y = info.get("trailingAnnualDividendYield", info.get("dividendYield"))
+                if div_y is None:
+                    div_rate = info.get("trailingAnnualDividendRate", info.get("dividendRate"))
+                    px = info.get("currentPrice", info.get("regularMarketPrice", info.get("previousClose")))
+                    if div_rate is not None and px not in (None, 0):
+                        div_y = float(div_rate) / float(px)
+            div_y = float(div_y) if div_y is not None else 0.0
+        except Exception:
+            div_y = 0.0
+
+        if (not np.isfinite(div_y)) or (div_y < 0):
+            div_y = 0.0
+        if div_y > 1.0:
+            div_y = div_y / 100.0
+        out[t] = div_y
+        time.sleep(0.2)
+    return out
 
 
 def build_black_litterman_view_matrices(view_rows, tickers):
@@ -1049,8 +1102,16 @@ if fetch_btn:
                 for t in portfolio_tickers
             }
     else:
+        try:
+            div_map = get_dividend_yields(portfolio_tickers)
+        except Exception:
+            div_map = {}
         sector_map = {
-            t: {"sector": "Unknown", "industry": "Unknown", "dividend_yield": 0.0}
+            t: {
+                "sector": "Unknown",
+                "industry": "Unknown",
+                "dividend_yield": float(div_map.get(t, 0.0)),
+            }
             for t in portfolio_tickers
         }
 
