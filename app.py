@@ -257,11 +257,16 @@ def download_prices(tickers: tuple, start, end, max_retries=5):
         prices = raw[["Close"]].copy()
         prices.columns = [tickers[0]]
 
+    first_valid_dates = prices.apply(lambda col: col.first_valid_index())
+
     prices = prices.ffill().bfill()
     prices = prices.dropna(axis=1, how="all")
     if prices.empty:
         raise RuntimeError("Yahoo returned no usable closing price columns.")
-    return prices
+
+    # Keep metadata only for columns that survived cleaning
+    first_valid_dates = first_valid_dates.reindex(prices.columns)
+    return prices, first_valid_dates.to_dict()
 
 
 def compute_weights_and_returns(prices, holdings, rebalance_freq="Daily (Constant Weights)"):
@@ -341,15 +346,15 @@ def compute_weights_and_returns(prices, holdings, rebalance_freq="Daily (Constan
 @st.cache_data(show_spinner="\U0001F4E1 Downloading Fama-French factors \u2026", ttl=86400)
 def download_fama_french() -> pd.DataFrame:
     """
-    Download the Fama-French 3-Factor daily dataset directly from
+    Download the Fama-French 5-Factor daily dataset directly from
     Kenneth French's website. Returns a DataFrame with columns
-    ['Mkt-RF', 'SMB', 'HML', 'RF'] in decimal form (not percentage).
-    Cached for 24 hours.
+    ['Mkt-RF', 'SMB', 'HML', 'RMW', 'CMA', 'RF'] in decimal form
+    (not percentage). Cached for 24 hours.
     """
     import urllib.request, zipfile, io
 
     url = ("https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/"
-           "ftp/F-F_Research_Data_Factors_daily_CSV.zip")
+           "ftp/F-F_Research_Data_5_Factors_2x3_daily_CSV.zip")
     resp = urllib.request.urlopen(url, timeout=30)
     z = zipfile.ZipFile(io.BytesIO(resp.read()))
     csv_name = z.namelist()[0]
@@ -368,7 +373,7 @@ def download_fama_french() -> pd.DataFrame:
     ff_df = pd.read_csv(
         StringIO("\n".join(data_lines)),
         header=None,
-        names=["Date", "Mkt-RF", "SMB", "HML", "RF"],
+        names=["Date", "Mkt-RF", "SMB", "HML", "RMW", "CMA", "RF"],
     )
     ff_df["Date"] = pd.to_datetime(ff_df["Date"], format="%Y%m%d")
     ff_df = ff_df.set_index("Date")
@@ -437,7 +442,7 @@ if run_btn:
 
     with st.spinner("Downloading data from Yahoo Finance..."):
         try:
-            all_prices = download_prices(all_tickers, full_start, end_date)
+            all_prices, first_valid_dates = download_prices(all_tickers, full_start, end_date)
         except Exception as e:
             st.error(
                 "Yahoo Finance download failed. This is usually a temporary "
@@ -462,6 +467,26 @@ if run_btn:
     if prices.empty:
         st.error("Yahoo Finance returned no data in the selected date range.")
         st.stop()
+
+    late_start_assets = []
+    late_start_threshold = pd.Timestamp(start_date) + pd.Timedelta(days=30)
+    for t in holdings["Ticker"].tolist():
+        first_dt = first_valid_dates.get(t)
+        if first_dt is None:
+            continue
+        try:
+            first_ts = pd.Timestamp(first_dt)
+        except Exception:
+            continue
+        if pd.notna(first_ts) and first_ts > late_start_threshold:
+            late_start_assets.append(f"{t} ({first_ts.strftime('%Y-%m-%d')})")
+
+    if late_start_assets:
+        st.warning(
+            "Note: The following assets did not trade for the entire backtest period. "
+            "Their earliest available price was assumed constant (0% return) prior to their inception: "
+            + ", ".join(late_start_assets)
+        )
 
     # --- Dynamic risk-free rate from 13-week T-Bill (^IRX) ---
     static_rf_daily = (1 + risk_free_rate) ** (1 / 252) - 1
@@ -795,14 +820,14 @@ with tab_risk:
             "The **Herfindahl-Hirschman Index** measures portfolio concentration. "
             "It's the sum of squared weights. A portfolio equally split among *N* "
             "assets has HHI = 1/N (the minimum); a single-stock portfolio has HHI = 1.\n\n"
-            "The **Normalized HHI** rescales this to 0?100%, where 0% = perfectly "
+            "The **Normalized HHI** rescales this to 0-100%, where 0% = perfectly "
             "equal-weighted and 100% = single asset.\n\n"
             "| Norm. HHI | Interpretation |\n"
             "|-----------|----------------|\n"
-            "| < 15%     | ?? Highly Diversified |\n"
-            "| 15?25%    | ?? Moderately Concentrated |\n"
-            "| 25?50%    | ?? Concentrated |\n"
-            "| > 50%     | ?? Highly Concentrated |"
+            "| < 15%     | \U0001F7E2 Highly Diversified |\n"
+            "| 15-25%    | \U0001F7E1 Moderately Concentrated |\n"
+            "| 25-50%    | \U0001F7E0 Concentrated |\n"
+            "| > 50%     | \U0001F534 Highly Concentrated |"
         )
 
     st.divider()
@@ -1023,7 +1048,7 @@ with tab_risk:
     st.metric("Portfolio Volatility (annualized, from cov matrix)", f"{port_vol_ann:.2%}")
 
 
-# ==================== TAB 3 ? FACTOR EXPOSURE (Fama-French 3-Factor) ====================
+# ==================== TAB 3 ? FACTOR EXPOSURE (Fama-French 5-Factor) ====================
 with tab_factor:
     # ?? Single-factor (CAPM) ? always available ????????
     st.subheader("Single-Factor Model (CAPM vs Benchmark)")
@@ -1060,13 +1085,14 @@ with tab_factor:
     st.plotly_chart(fig_sf, width='stretch')
 
     st.divider()
-
-    # ?? Fama-French 3-Factor Model ?????????????????????
-    st.subheader("Fama-French 3-Factor Model")
+    # ?? Fama-French 5-Factor Model ?????????????????????
+    st.subheader("Fama-French 5-Factor Model")
     st.caption(
-        "Regresses portfolio excess returns against three systematic risk factors "
+        "Regresses portfolio excess returns against five systematic risk factors "
         "from Kenneth French's data library: **Mkt-RF** (market risk premium), "
-        "**SMB** (Small Minus Big ? size factor), and **HML** (High Minus Low ? value factor)."
+        "**SMB** (Small Minus Big - size factor), **HML** (High Minus Low - value factor), "
+        "**RMW** (Robust Minus Weak - profitability), and "
+        "**CMA** (Conservative Minus Aggressive - investment)."
     )
 
     if not HAS_STATSMODELS:
@@ -1082,7 +1108,7 @@ with tab_factor:
         ff_common = port_ret.index.intersection(ff_factors.index)
 
         if len(ff_common) < 30:
-            st.warning(f"Only {len(ff_common)} overlapping dates with FF data ? "
+            st.warning(f"Only {len(ff_common)} overlapping dates with FF data - "
                        "need at least 30 for a meaningful regression.")
         else:
             pr_ff = port_ret.loc[ff_common]
@@ -1090,13 +1116,13 @@ with tab_factor:
 
             # Excess return = portfolio return - risk-free rate
             y = pr_ff - factors["RF"]
-            X = factors[["Mkt-RF", "SMB", "HML"]]
+            X = factors[["Mkt-RF", "SMB", "HML", "RMW", "CMA"]]
             X = sm_api.add_constant(X)
 
             model = sm_api.OLS(y, X).fit()
             params = model.params
-            pvals  = model.pvalues
-            ci     = model.conf_int(alpha=0.05)
+            pvals = model.pvalues
+            ci = model.conf_int(alpha=0.05)
             ci.columns = ["Lower 95%", "Upper 95%"]
 
             alpha_daily = params["const"]
@@ -1104,10 +1130,12 @@ with tab_factor:
             mkt_beta = params["Mkt-RF"]
             smb_beta = params["SMB"]
             hml_beta = params["HML"]
+            rmw_beta = params["RMW"]
+            cma_beta = params["CMA"]
 
             # ?? Metric cards ??
             st.markdown("##### Factor Loadings")
-            ff1, ff2, ff3, ff4 = st.columns(4)
+            ff1, ff2, ff3 = st.columns(3)
             ff1.metric(
                 "Alpha (annualized)", f"{alpha_annual:.2%}",
                 help=f"Daily alpha: {alpha_daily:.4%} | "
@@ -1123,30 +1151,68 @@ with tab_factor:
                 help=f"p-value: {pvals['SMB']:.4f} | "
                      f"Positive = small-cap tilt, Negative = large-cap tilt",
             )
+
+            ff4, ff5, ff6 = st.columns(3)
             ff4.metric(
                 "Value Beta (HML)", f"{hml_beta:.3f}",
                 help=f"p-value: {pvals['HML']:.4f} | "
                      f"Positive = value tilt, Negative = growth tilt",
             )
+            ff5.metric(
+                "Profitability Beta (RMW)", f"{rmw_beta:.3f}",
+                help=f"p-value: {pvals['RMW']:.4f} | "
+                     f"Positive = quality/profitability tilt",
+            )
+            ff6.metric(
+                "Investment Beta (CMA)", f"{cma_beta:.3f}",
+                help=f"p-value: {pvals['CMA']:.4f} | "
+                     f"Positive = conservative investment tilt",
+            )
 
-            ff5, ff6, ff7, ff8 = st.columns(4)
-            ff5.metric("R\u00b2", f"{model.rsquared:.2%}")
-            ff6.metric("Adj. R\u00b2", f"{model.rsquared_adj:.2%}")
-            ff7.metric("Observations", f"{int(model.nobs):,}")
-            ff8.metric("Residual Vol (ann.)",
-                       f"{model.resid.std() * np.sqrt(252):.2%}",
-                       help="Idiosyncratic risk ? the volatility not explained by the three factors.")
+            ff7, ff8, ff9, ff10 = st.columns(4)
+            ff7.metric("R^2", f"{model.rsquared:.2%}")
+            ff8.metric("Adj. R^2", f"{model.rsquared_adj:.2%}")
+            ff9.metric("Observations", f"{int(model.nobs):,}")
+            ff10.metric(
+                "Residual Vol (ann.)",
+                f"{model.resid.std() * np.sqrt(252):.2%}",
+                help="Idiosyncratic risk - the volatility not explained by the five factors.",
+            )
 
             st.divider()
 
             # ?? Factor loadings bar chart ??
-            st.markdown("##### Factor Loadings ? Visual")
+            st.markdown("##### Factor Loadings - Visual")
             betas = pd.DataFrame({
-                "Factor": ["Mkt-RF\n(Market)", "SMB\n(Size)", "HML\n(Value)"],
-                "Beta": [mkt_beta, smb_beta, hml_beta],
-                "Lower": [ci.loc["Mkt-RF", "Lower 95%"], ci.loc["SMB", "Lower 95%"], ci.loc["HML", "Lower 95%"]],
-                "Upper": [ci.loc["Mkt-RF", "Upper 95%"], ci.loc["SMB", "Upper 95%"], ci.loc["HML", "Upper 95%"]],
-                "p-value": [pvals["Mkt-RF"], pvals["SMB"], pvals["HML"]],
+                "Factor": [
+                    "Mkt-RF\n(Market)",
+                    "SMB\n(Size)",
+                    "HML\n(Value)",
+                    "RMW\n(Profitability)",
+                    "CMA\n(Investment)",
+                ],
+                "Beta": [mkt_beta, smb_beta, hml_beta, rmw_beta, cma_beta],
+                "Lower": [
+                    ci.loc["Mkt-RF", "Lower 95%"],
+                    ci.loc["SMB", "Lower 95%"],
+                    ci.loc["HML", "Lower 95%"],
+                    ci.loc["RMW", "Lower 95%"],
+                    ci.loc["CMA", "Lower 95%"],
+                ],
+                "Upper": [
+                    ci.loc["Mkt-RF", "Upper 95%"],
+                    ci.loc["SMB", "Upper 95%"],
+                    ci.loc["HML", "Upper 95%"],
+                    ci.loc["RMW", "Upper 95%"],
+                    ci.loc["CMA", "Upper 95%"],
+                ],
+                "p-value": [
+                    pvals["Mkt-RF"],
+                    pvals["SMB"],
+                    pvals["HML"],
+                    pvals["RMW"],
+                    pvals["CMA"],
+                ],
             })
             # Color: significant = bold blue/red, insignificant = gray
             colors = []
@@ -1172,15 +1238,15 @@ with tab_factor:
             ))
             fig_betas.add_vline(x=0, line_dash="dash", line_color="#666", line_width=1)
             fig_betas.update_layout(
-                xaxis_title="Factor Loading (\u03b2)",
-                height=280,
-                margin=dict(l=100, r=60, t=20, b=40),
+                xaxis_title="Factor Loading (beta)",
+                height=320,
+                margin=dict(l=120, r=60, t=20, b=40),
             )
             st.plotly_chart(fig_betas, width='stretch')
 
             st.caption(
                 "**Colored bars** are statistically significant at the 5% level. "
-                "**Gray bars** are not significant ? the loading may be due to noise. "
+                "**Gray bars** are not significant - the loading may be due to noise. "
                 "Error bars show the 95% confidence interval."
             )
 
@@ -1192,46 +1258,66 @@ with tab_factor:
             if pvals["Mkt-RF"] < 0.05:
                 if mkt_beta > 1.05:
                     interp_lines.append(
-                        f"\U0001F534 **Mkt-RF = {mkt_beta:.2f}**: Your portfolio is **aggressive** \u2014 "
-                        "it amplifies market moves. A 1% market gain gives you ~{:.2f}% gain, "
-                        "but losses are amplified too.".format(mkt_beta))
+                        f"**Mkt-RF = {mkt_beta:.2f}**: Your portfolio is **aggressive** - "
+                        "it amplifies market moves."
+                    )
                 elif mkt_beta < 0.95:
                     interp_lines.append(
-                        f"\U0001F7E2 **Mkt-RF = {mkt_beta:.2f}**: Your portfolio is **defensive** \u2014 "
-                        "it dampens market swings.")
+                        f"**Mkt-RF = {mkt_beta:.2f}**: Your portfolio is **defensive** - "
+                        "it dampens market swings."
+                    )
                 else:
                     interp_lines.append(
-                        f"\u26aa **Mkt-RF = {mkt_beta:.2f}**: Your portfolio moves roughly in line "
-                        "with the market.")
+                        f"**Mkt-RF = {mkt_beta:.2f}**: Your portfolio moves roughly in line "
+                        "with the market."
+                    )
 
             if pvals["SMB"] < 0.05:
                 tilt = "small-cap" if smb_beta > 0 else "large-cap"
                 interp_lines.append(
-                    f"\U0001F4D0 **SMB = {smb_beta:.2f}**: Significant **{tilt} tilt**. "
-                    + ("Your returns benefit when smaller companies outperform." if smb_beta > 0
-                       else "Your returns benefit when larger companies outperform."))
+                    f"**SMB = {smb_beta:.2f}**: Significant **{tilt} tilt**."
+                )
             else:
                 interp_lines.append(
-                    f"\U0001F4D0 **SMB = {smb_beta:.2f}**: No significant size tilt (p = {pvals['SMB']:.2f}).")
+                    f"**SMB = {smb_beta:.2f}**: No significant size tilt (p = {pvals['SMB']:.2f})."
+                )
 
             if pvals["HML"] < 0.05:
                 tilt = "value" if hml_beta > 0 else "growth"
                 interp_lines.append(
-                    f"\U0001F4CA **HML = {hml_beta:.2f}**: Significant **{tilt} tilt**. "
-                    + ("Your returns benefit when cheaper (value) stocks outperform." if hml_beta > 0
-                       else "Your returns benefit when expensive (growth) stocks outperform."))
+                    f"**HML = {hml_beta:.2f}**: Significant **{tilt} tilt**."
+                )
             else:
                 interp_lines.append(
-                    f"\U0001F4CA **HML = {hml_beta:.2f}**: No significant value/growth tilt (p = {pvals['HML']:.2f}).")
+                    f"**HML = {hml_beta:.2f}**: No significant value/growth tilt (p = {pvals['HML']:.2f})."
+                )
+
+            if pvals["RMW"] < 0.05:
+                interp_lines.append(
+                    f"**RMW = {rmw_beta:.2f}**: Significant profitability exposure."
+                )
+            else:
+                interp_lines.append(
+                    f"**RMW = {rmw_beta:.2f}**: No significant profitability tilt (p = {pvals['RMW']:.2f})."
+                )
+
+            if pvals["CMA"] < 0.05:
+                interp_lines.append(
+                    f"**CMA = {cma_beta:.2f}**: Significant investment-style exposure."
+                )
+            else:
+                interp_lines.append(
+                    f"**CMA = {cma_beta:.2f}**: No significant investment tilt (p = {pvals['CMA']:.2f})."
+                )
 
             if pvals["const"] < 0.05 and alpha_annual > 0:
                 interp_lines.append(
-                    f"\u2728 **Alpha = {alpha_annual:.2%}/yr**: Statistically significant positive alpha! "
-                    "Your portfolio generates returns not explained by market, size, or value factors.")
+                    f"**Alpha = {alpha_annual:.2%}/yr**: Statistically significant positive alpha."
+                )
             elif pvals["const"] < 0.05 and alpha_annual < 0:
                 interp_lines.append(
-                    f"\u26a0\ufe0f **Alpha = {alpha_annual:.2%}/yr**: Statistically significant negative alpha. "
-                    "After accounting for factor exposures, the portfolio underperforms.")
+                    f"**Alpha = {alpha_annual:.2%}/yr**: Statistically significant negative alpha."
+                )
 
             for line in interp_lines:
                 st.markdown(line)
@@ -1240,21 +1326,22 @@ with tab_factor:
 
             # ?? Full regression table ??
             st.markdown("##### Full Regression Output")
+            coef_order = ["const", "Mkt-RF", "SMB", "HML", "RMW", "CMA"]
             reg_table = pd.DataFrame({
-                "Coefficient": params.values,
-                "Std Error": model.bse.values,
-                "t-stat": model.tvalues.values,
-                "p-value": pvals.values,
-                "95% CI Lower": ci["Lower 95%"].values,
-                "95% CI Upper": ci["Upper 95%"].values,
-            }, index=["Alpha (const)", "Mkt-RF", "SMB", "HML"])
+                "Coefficient": params[coef_order].values,
+                "Std Error": model.bse[coef_order].values,
+                "t-stat": model.tvalues[coef_order].values,
+                "p-value": pvals[coef_order].values,
+                "95% CI Lower": ci.loc[coef_order, "Lower 95%"].values,
+                "95% CI Upper": ci.loc[coef_order, "Upper 95%"].values,
+            }, index=["Alpha (const)", "Mkt-RF", "SMB", "HML", "RMW", "CMA"])
 
             # Format
             reg_display = reg_table.copy()
             reg_display["Coefficient"] = reg_display["Coefficient"].map("{:.6f}".format)
-            reg_display["Std Error"]   = reg_display["Std Error"].map("{:.6f}".format)
-            reg_display["t-stat"]      = reg_display["t-stat"].map("{:.3f}".format)
-            reg_display["p-value"]     = reg_display["p-value"].map("{:.4f}".format)
+            reg_display["Std Error"] = reg_display["Std Error"].map("{:.6f}".format)
+            reg_display["t-stat"] = reg_display["t-stat"].map("{:.3f}".format)
+            reg_display["p-value"] = reg_display["p-value"].map("{:.4f}".format)
             reg_display["95% CI Lower"] = reg_display["95% CI Lower"].map("{:.4f}".format)
             reg_display["95% CI Upper"] = reg_display["95% CI Upper"].map("{:.4f}".format)
             st.dataframe(reg_display, width='stretch')
@@ -1265,34 +1352,58 @@ with tab_factor:
             st.markdown("##### Factor Return Attribution")
             st.caption(
                 "Breaks annualized portfolio excess return into contributions from "
-                "Alpha, Market (Mkt-RF), Size (SMB), and Value (HML)."
+                "Alpha, Market (Mkt-RF), Size (SMB), Value (HML), "
+                "Profitability (RMW), and Investment (CMA)."
             )
 
             mkt_ann = annualized_return(factors["Mkt-RF"])
             smb_ann = annualized_return(factors["SMB"])
             hml_ann = annualized_return(factors["HML"])
+            rmw_ann = annualized_return(factors["RMW"])
+            cma_ann = annualized_return(factors["CMA"])
             port_excess_ann = annualized_return(y)
 
             market_contrib = mkt_beta * mkt_ann
             size_contrib = smb_beta * smb_ann
             value_contrib = hml_beta * hml_ann
+            profit_contrib = rmw_beta * rmw_ann
+            invest_contrib = cma_beta * cma_ann
             alpha_contrib = alpha_annual
-            total_excess_model = alpha_contrib + market_contrib + size_contrib + value_contrib
+            total_excess_model = (
+                alpha_contrib
+                + market_contrib
+                + size_contrib
+                + value_contrib
+                + profit_contrib
+                + invest_contrib
+            )
 
             wf_labels = [
                 "Alpha",
                 "Market Risk",
                 "Size Factor",
                 "Value Factor",
+                "Profitability Factor",
+                "Investment Factor",
                 "Total Excess Return",
             ]
-            wf_measures = ["relative", "relative", "relative", "relative", "total"]
-            wf_values = [alpha_contrib, market_contrib, size_contrib, value_contrib, 0.0]
+            wf_measures = ["relative", "relative", "relative", "relative", "relative", "relative", "total"]
+            wf_values = [
+                alpha_contrib,
+                market_contrib,
+                size_contrib,
+                value_contrib,
+                profit_contrib,
+                invest_contrib,
+                0.0,
+            ]
             wf_text = [
                 f"{alpha_contrib:+.2%}",
                 f"{market_contrib:+.2%}",
                 f"{size_contrib:+.2%}",
                 f"{value_contrib:+.2%}",
+                f"{profit_contrib:+.2%}",
+                f"{invest_contrib:+.2%}",
                 f"{total_excess_model:+.2%}",
             ]
 
@@ -1321,6 +1432,8 @@ with tab_factor:
                     "Market (Mkt-RF)",
                     "Size (SMB)",
                     "Value (HML)",
+                    "Profitability (RMW)",
+                    "Investment (CMA)",
                     "Total Excess Return (Model)",
                     "Portfolio Excess Return (Actual)",
                 ],
@@ -1329,6 +1442,8 @@ with tab_factor:
                     mkt_beta,
                     smb_beta,
                     hml_beta,
+                    rmw_beta,
+                    cma_beta,
                     np.nan,
                     np.nan,
                 ],
@@ -1337,6 +1452,8 @@ with tab_factor:
                     mkt_ann,
                     smb_ann,
                     hml_ann,
+                    rmw_ann,
+                    cma_ann,
                     np.nan,
                     np.nan,
                 ],
@@ -1345,6 +1462,8 @@ with tab_factor:
                     market_contrib,
                     size_contrib,
                     value_contrib,
+                    profit_contrib,
+                    invest_contrib,
                     total_excess_model,
                     port_excess_ann,
                 ],
@@ -1352,10 +1471,10 @@ with tab_factor:
 
             attr_display = attr_df.copy()
             attr_display["Beta (Sensitivity)"] = attr_display["Beta (Sensitivity)"].map(
-                lambda v: "\u2014" if pd.isna(v) else f"{v:.3f}"
+                lambda v: "-" if pd.isna(v) else f"{v:.3f}"
             )
             attr_display["Factor Return (Ann.)"] = attr_display["Factor Return (Ann.)"].map(
-                lambda v: "\u2014" if pd.isna(v) else f"{v:+.2%}"
+                lambda v: "-" if pd.isna(v) else f"{v:+.2%}"
             )
             attr_display["Contribution to Portfolio (Ann.)"] = attr_display[
                 "Contribution to Portfolio (Ann.)"
