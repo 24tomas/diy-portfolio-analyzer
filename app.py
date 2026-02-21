@@ -617,6 +617,43 @@ def dynamic_sharpe(returns, rf_daily):
     if len(excess) < 2 or excess.std() == 0:
         return 0.0
     return float(excess.mean() / excess.std() * np.sqrt(252))
+
+def _capture_ratio_fallback(portfolio_returns, benchmark_returns, up_market=True):
+    """Compute up/down capture ratio without relying on QuantStats availability."""
+    aligned = pd.concat([portfolio_returns, benchmark_returns], axis=1).dropna()
+    if aligned.empty:
+        return np.nan
+    p = aligned.iloc[:, 0].astype(float)
+    b = aligned.iloc[:, 1].astype(float)
+    mask = (b > 0) if up_market else (b < 0)
+    if mask.sum() == 0:
+        return np.nan
+    p_seg = p[mask]
+    b_seg = b[mask]
+    p_comp = (1 + p_seg).prod() - 1
+    b_comp = (1 + b_seg).prod() - 1
+    if np.isclose(b_comp, 0.0):
+        return np.nan
+    return float(p_comp / b_comp)
+
+def safe_up_capture(portfolio_returns, benchmark_returns):
+    fn = getattr(qs.stats, "up_capture", None)
+    if callable(fn):
+        try:
+            return float(fn(portfolio_returns, benchmark_returns))
+        except Exception:
+            pass
+    return _capture_ratio_fallback(portfolio_returns, benchmark_returns, up_market=True)
+
+def safe_down_capture(portfolio_returns, benchmark_returns):
+    fn = getattr(qs.stats, "down_capture", None)
+    if callable(fn):
+        try:
+            return float(fn(portfolio_returns, benchmark_returns))
+        except Exception:
+            pass
+    return _capture_ratio_fallback(portfolio_returns, benchmark_returns, up_market=False)
+
 def max_drawdown(r):      c = (1 + r).cumprod(); return ((c - c.cummax()) / c.cummax()).min()
 
 st.subheader("Your Holdings")
@@ -702,8 +739,8 @@ with tab_perf:
     k2.metric("CAGR",         f"{qs_cagr:.2%}",  delta=f"{qs_cagr - b_cagr:+.2%} vs {bench}")
     k3.metric("Ann. Vol.",    f"{qs_vol:.2%}",    delta=f"{qs_vol - b_vol:+.2%} vs {bench}",
               delta_color="inverse")
-    up_cap = qs.stats.up_capture(port_ret, bench_ret)
-    down_cap = qs.stats.down_capture(port_ret, bench_ret)
+    up_cap = safe_up_capture(port_ret, bench_ret)
+    down_cap = safe_down_capture(port_ret, bench_ret)
     k4, k5, k6 = st.columns(3)
     k4.metric("Sharpe Ratio",      f"{qs_sharpe:.2f}")
     k5.metric("Information Ratio", f"{qs_info:.2f}",
@@ -765,8 +802,8 @@ with tab_perf:
                 "Profit Factor": lambda: f"{qs.stats.profit_factor(comp_ret):.2f}",
                 "Skew": lambda: f"{qs.stats.skew(comp_ret):.2f}",
                 "Kurtosis": lambda: f"{qs.stats.kurtosis(comp_ret):.2f}",
-                "Up Capture Ratio": lambda: f"{qs.stats.up_capture(comp_ret, bench_ret):.2f}",
-                "Down Capture Ratio": lambda: f"{qs.stats.down_capture(comp_ret, bench_ret):.2f}",
+                "Up Capture Ratio": lambda: f"{safe_up_capture(comp_ret, bench_ret):.2f}",
+                "Down Capture Ratio": lambda: f"{safe_down_capture(comp_ret, bench_ret):.2f}",
             }
             cols[comp_name].append(fn_map.get(metric, lambda: "?")())
     st.dataframe(pd.DataFrame(cols).set_index("Metric"), width='stretch')
