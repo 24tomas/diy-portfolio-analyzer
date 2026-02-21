@@ -465,12 +465,18 @@ if run_btn:
         & (all_prices.index <= pd.Timestamp(end_date))
     ].copy()
 
-    missing = [t for t in all_tickers if t not in all_prices.columns and t != "^IRX"]
-    if missing:
-        st.warning(f"No data for: **{', '.join(missing)}**. Excluded.")
+    missing_tickers = [t for t in all_tickers if t not in all_prices.columns and t != "^IRX"]
+    if missing_tickers:
+        st.warning(
+            f"⚠️ No data found for: **{', '.join(missing_tickers)}**. "
+            "They have been excluded from the analysis. Please check the tickers or your date range."
+        )
 
     if prices.empty:
-        st.error("Yahoo Finance returned no data in the selected date range.")
+        st.error(
+            "❌ No valid price data found for any of the provided tickers. "
+            "Please check your spelling or try a different date range."
+        )
         st.stop()
 
     late_start_assets = []
@@ -735,26 +741,26 @@ with tab_perf:
     b_vol     = qs.stats.volatility(bench_ret)
 
     k1, k2, k3 = st.columns(3)
-    k1.metric("Total Return", f"{qs_total:.2%}", delta=f"{qs_total - b_total:+.2%} vs {bench}")
-    k2.metric("CAGR",         f"{qs_cagr:.2%}",  delta=f"{qs_cagr - b_cagr:+.2%} vs {bench}")
-    k3.metric("Ann. Vol.",    f"{qs_vol:.2%}",    delta=f"{qs_vol - b_vol:+.2%} vs {bench}",
+    k1.metric("Total Return (Portfolio)", f"{qs_total:.2%}", delta=f"{qs_total - b_total:+.2%} vs {bench}")
+    k2.metric("CAGR (Portfolio)",         f"{qs_cagr:.2%}",  delta=f"{qs_cagr - b_cagr:+.2%} vs {bench}")
+    k3.metric("Volatility (Ann.)",        f"{qs_vol:.2%}",    delta=f"{qs_vol - b_vol:+.2%} vs {bench}",
               delta_color="inverse")
     up_cap = safe_up_capture(port_ret, bench_ret)
     down_cap = safe_down_capture(port_ret, bench_ret)
     k4, k5, k6 = st.columns(3)
-    k4.metric("Sharpe Ratio",      f"{qs_sharpe:.2f}")
-    k5.metric("Information Ratio", f"{qs_info:.2f}",
+    k4.metric("Sharpe Ratio (Ann.)",      f"{qs_sharpe:.2f}")
+    k5.metric("Information Ratio (vs Bench)", f"{qs_info:.2f}",
               help="> 0.5 is good, > 1.0 is excellent.")
-    k6.metric("Sortino Ratio",     f"{qs.stats.sortino(port_ret):.2f}",
+    k6.metric("Sortino Ratio (Ann.)",     f"{qs.stats.sortino(port_ret):.2f}",
               help="Like Sharpe but only penalises downside volatility.")
     k7, k8 = st.columns(2)
     k7.metric(
-        "Up Capture Ratio", 
+        "Up Market Capture", 
         f"{up_cap:.2f}", 
         help="> 1.0 is excellent. Shows the portfolio's participation in benchmark gains."
     )
     k8.metric(
-        "Down Capture Ratio", 
+        "Down Market Capture", 
         f"{down_cap:.2f}", 
         help="< 1.0 is excellent. Shows the portfolio's participation in benchmark losses.",
         delta_color="inverse"
