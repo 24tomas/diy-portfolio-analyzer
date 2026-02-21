@@ -125,20 +125,76 @@ with st.sidebar:
             {"Ticker": ["AAPL", "MSFT", "GOOGL"], "Shares": [10, 15, 8]}
         )
 
-    edited_holdings = st.data_editor(
-        st.session_state["holdings"],
-        num_rows="dynamic",
-        width='stretch',
-        column_config={
-            "Ticker": st.column_config.TextColumn(
-                "Ticker", help="Stock symbol, e.g. AAPL", required=True),
-            "Shares": st.column_config.NumberColumn(
-                "Shares", help="Number of shares you own",
-                min_value=0.0001, required=True, format="%.4g"),
+    holdings_df = st.session_state["holdings"].copy()
+    if not holdings_df.empty:
+        holdings_df = holdings_df.dropna(subset=["Ticker"])
+        holdings_df["Ticker"] = holdings_df["Ticker"].astype(str).str.strip().str.upper()
+        holdings_df = holdings_df[holdings_df["Ticker"] != ""]
+    holdings_df = holdings_df.reset_index(drop=True)
+
+    holdings_share_map = {}
+    for _, row in holdings_df.iterrows():
+        ticker = str(row["Ticker"]).strip().upper()
+        shares_val = pd.to_numeric(row.get("Shares", np.nan), errors="coerce")
+        holdings_share_map[ticker] = float(shares_val) if pd.notna(shares_val) else 10.0
+
+    unique_tickers = list(holdings_share_map.keys())
+    if "optim_shares" not in st.session_state:
+        st.session_state["optim_shares"] = holdings_share_map.copy()
+    else:
+        synced_shares = {}
+        for ticker in unique_tickers:
+            if ticker in st.session_state["optim_shares"]:
+                synced_shares[ticker] = float(st.session_state["optim_shares"][ticker])
+            else:
+                synced_shares[ticker] = float(holdings_share_map.get(ticker, 10.0))
+        st.session_state["optim_shares"] = synced_shares
+
+    new_ticker = st.text_input("Add Ticker", key="new_ticker_input").strip().upper()
+    if st.button("➕ Add", width='stretch'):
+        if not new_ticker:
+            st.warning("Enter a ticker first.")
+        elif new_ticker in st.session_state["optim_shares"]:
+            st.info(f"{new_ticker} is already in your portfolio.")
+        else:
+            st.session_state["optim_shares"][new_ticker] = 10.0
+            st.session_state["holdings"] = pd.concat(
+                [
+                    holdings_df[["Ticker", "Shares"]] if not holdings_df.empty else pd.DataFrame(columns=["Ticker", "Shares"]),
+                    pd.DataFrame([{"Ticker": new_ticker, "Shares": 10.0}]),
+                ],
+                ignore_index=True,
+            )
+            st.success(f"Added {new_ticker} with 10 shares.")
+            st.rerun()
+
+    if not st.session_state["optim_shares"]:
+        st.info("No tickers yet. Add one above to start building your portfolio.")
+    else:
+        for ticker in list(st.session_state["optim_shares"].keys()):
+            with st.container():
+                st.markdown(f"**{ticker}**")
+                current_val = float(st.session_state["optim_shares"].get(ticker, 10.0))
+                current_val = min(1000.0, max(0.0, current_val))
+                slider_val = st.slider(
+                    f"Shares of {ticker}",
+                    min_value=0.0,
+                    max_value=1000.0,
+                    value=current_val,
+                    step=1.0,
+                    key=f"slider_{ticker}",
+                )
+                st.session_state["optim_shares"][ticker] = float(slider_val)
+                st.divider()
+
+    edited_holdings = pd.DataFrame(
+        {
+            "Ticker": list(st.session_state["optim_shares"].keys()),
+            "Shares": [float(v) for v in st.session_state["optim_shares"].values()],
         },
-        hide_index=True,
-        key="holdings_editor",
+        columns=["Ticker", "Shares"],
     )
+    st.session_state["holdings"] = edited_holdings.copy()
 
     # Save current portfolio
     save_name = st.text_input("Save current portfolio as", key="save_name_input")
@@ -274,7 +330,9 @@ def download_prices(tickers: tuple, start, end, max_retries=5):
     return prices, first_valid_dates.to_dict()
 
 
-def compute_weights_and_returns(prices, holdings, rebalance_freq="Daily (Constant Weights)"):
+def compute_weights_and_returns(
+    prices, holdings, rebalance_freq="Daily (Constant Weights)", shares_dict=None
+):
     """Compute portfolio returns via a proper backtest simulation.
 
     Target weights are derived from the user's current shares and the latest
@@ -282,6 +340,9 @@ def compute_weights_and_returns(prices, holdings, rebalance_freq="Daily (Constan
     hypothetical capital ($10,000) according to the chosen rebalancing
     strategy, eliminating look-ahead bias from constant-weight assumptions.
     """
+    if shares_dict is None:
+        shares_dict = dict(zip(holdings["Ticker"], holdings["Shares"]))
+
     INITIAL_CAPITAL = 10_000.0
 
     valid = holdings[holdings["Ticker"].isin(prices.columns)].copy()
@@ -292,7 +353,8 @@ def compute_weights_and_returns(prices, holdings, rebalance_freq="Daily (Constan
     # Target weights from latest prices and shares
     latest = prices.iloc[-1]
     valid["Price"] = valid["Ticker"].map(latest)
-    valid["Value"] = valid["Shares"] * valid["Price"]
+    valid["Shares_Count"] = valid["Ticker"].map(lambda t: shares_dict.get(t, 0.0))
+    valid["Value"] = valid["Shares_Count"] * valid["Price"]
     total = valid["Value"].sum()
     valid["Weight"] = valid["Value"] / total
     tickers = valid["Ticker"].tolist()
@@ -305,11 +367,10 @@ def compute_weights_and_returns(prices, holdings, rebalance_freq="Daily (Constan
         port_ret = ind_ret.dot(w)
 
     elif rebalance_freq == "Buy & Hold":
-        # Allocate starting capital on day 1, then let positions drift
+        # Hold explicit share counts and track their historical value
         asset_prices = prices[tickers]
-        initial_prices = asset_prices.iloc[0].values
-        shares = (INITIAL_CAPITAL * w) / initial_prices
-        port_value = asset_prices.multiply(shares, axis=1).sum(axis=1)
+        current_shares = np.array([shares_dict.get(t, 0.0) for t in tickers])
+        port_value = (asset_prices * current_shares).sum(axis=1)
         port_ret = port_value.pct_change().dropna()
 
     else:
@@ -518,7 +579,10 @@ if run_btn:
             all_prices = all_prices.drop(columns=["^IRX"])
             prices = prices.drop(columns=["^IRX"], errors="ignore")
 
-    port_ret, ind_ret, wt = compute_weights_and_returns(prices, holdings, rebalance_freq)
+    optim_shares = st.session_state.get("optim_shares", {})
+    port_ret, ind_ret, wt = compute_weights_and_returns(
+        prices, holdings, rebalance_freq, shares_dict=optim_shares
+    )
 
     if bench not in prices.columns:
         st.error(f"Benchmark **{bench}** has no data.")
@@ -531,7 +595,9 @@ if run_btn:
     comp_wt = None
     comp_name = None
     if comp_holdings is not None:
-        comp_ret, _, comp_wt = compute_weights_and_returns(prices, comp_holdings, rebalance_freq)
+        comp_ret, _, comp_wt = compute_weights_and_returns(
+            prices, comp_holdings, rebalance_freq, shares_dict=None
+        )
         comp_ret.name = compare_choice
         comp_name = compare_choice
 
