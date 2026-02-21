@@ -11,6 +11,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+import plotly.figure_factory as ff
 import quantstats as qs
 import time
 import random
@@ -49,6 +50,12 @@ try:
 except Exception:
     sp_opt = None
     HAS_SCIPY_OPT = False
+try:
+    from scipy.spatial.distance import squareform
+    HAS_SCIPY_DISTANCE = True
+except Exception:
+    squareform = None
+    HAS_SCIPY_DISTANCE = False
 
 # Keep chart rendering on Streamlit's native dark theme.
 _ORIG_ST_PLOTLY_CHART = st.plotly_chart
@@ -1860,6 +1867,44 @@ with tab_risk:
     fig_corr.update_layout(height=max(400, len(valid_tickers) * 20),
                            margin=dict(l=40, r=20, t=20, b=40))
     st.plotly_chart(fig_corr, width='stretch')
+
+    st.subheader("Asset Clustering (Hierarchical Risk Parity)")
+    if len(valid_tickers) < 2:
+        st.info("At least two assets are required to build a dendrogram.")
+    elif not HAS_SCIPY_DISTANCE or squareform is None:
+        st.info("SciPy distance tools are unavailable, so clustering cannot be computed.")
+    else:
+        try:
+            corr_for_cluster = ind_ret[valid_tickers].corr().astype(float)
+            corr_for_cluster = corr_for_cluster.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            corr_for_cluster = corr_for_cluster.clip(-1.0, 1.0)
+            np.fill_diagonal(corr_for_cluster.values, 1.0)
+
+            # Financial distance used for hierarchical clustering.
+            distance_matrix = np.sqrt(np.clip(0.5 * (1.0 - corr_for_cluster), 0.0, None))
+            np.fill_diagonal(distance_matrix.values, 0.0)
+            condensed_dist = squareform(distance_matrix.values, checks=False)
+
+            fig_dendro = ff.create_dendrogram(
+                distance_matrix.values,
+                labels=valid_tickers,
+                distfun=lambda _: condensed_dist,
+            )
+            dendro_font_color = "#D0D0D0" if st.session_state.get("dark_mode", True) else "#1E2430"
+            fig_dendro.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color=dendro_font_color),
+                height=max(400, len(valid_tickers) * 20),
+                margin=dict(l=40, r=20, t=20, b=40),
+            )
+            st.plotly_chart(fig_dendro, width='stretch')
+            st.caption(
+                "Assets linked by shorter branches tend to behave more similarly "
+                "than assets connected by longer branches."
+            )
+        except Exception as e:
+            st.warning(f"Could not render dendrogram: {e}")
 
     st.divider()
 
