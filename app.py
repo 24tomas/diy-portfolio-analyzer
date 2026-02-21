@@ -167,9 +167,14 @@ with st.sidebar:
     col1, col2 = st.columns(2)
     with col1:
         start_date = st.date_input("Start Date",
-                                   value=date.today() - timedelta(days=3*365))
+                                   value=date.today() - timedelta(days=3*365),
+                                   min_value=date(1970, 1, 1),
+                                   max_value=date.today())
     with col2:
-        end_date = st.date_input("End Date", value=date.today())
+        end_date = st.date_input("End Date", 
+                                 value=date.today(),
+                                 min_value=date(1970, 1, 1),
+                                 max_value=date.today())
 
     benchmark_ticker = st.text_input("Benchmark", value="SPY",
                                      help="Used for comparison in charts and factor analysis")
