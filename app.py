@@ -1170,7 +1170,6 @@ for k, v in {
     "comp_ret": comp_ret, "comp_wt": comp_wt, "comp_name": comp_name,
     "ff_factors": ff_factors, "sector_map": sector_map,
     "analysis_start": analysis_start, "analysis_end": analysis_end,
-    "input_mode": input_mode,
 }.items():
     st.session_state[k] = v
 
