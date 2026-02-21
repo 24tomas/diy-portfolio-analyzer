@@ -176,25 +176,67 @@ with st.sidebar:
     if not st.session_state["optim_shares"]:
         st.info("No tickers yet. Add one above to start building your portfolio.")
     else:
+        def _sync_from_num(ticker_name: str):
+            num_key = f"num_{ticker_name}"
+            slide_key = f"slide_{ticker_name}"
+            v = float(st.session_state.get(num_key, 0.0))
+            v = max(0.0, v)
+            st.session_state["optim_shares"][ticker_name] = v
+            st.session_state[slide_key] = v
+
+        def _sync_from_slide(ticker_name: str):
+            num_key = f"num_{ticker_name}"
+            slide_key = f"slide_{ticker_name}"
+            v = float(st.session_state.get(slide_key, 0.0))
+            v = max(0.0, v)
+            st.session_state["optim_shares"][ticker_name] = v
+            st.session_state[num_key] = v
+
         for ticker in list(st.session_state["optim_shares"].keys()):
-            c1, c2, c3 = st.columns([2, 1, 0.6])
-            c1.markdown(f"**{ticker}**")
-            current_val = float(st.session_state["optim_shares"].get(ticker, 10.0))
-            current_val = max(0.0, current_val)
-            new_val = c2.number_input(
-                f"Shares of {ticker}",
-                min_value=0.0,
-                step=1.0,
-                format="%.2f",
-                value=current_val,
-                key=f"input_{ticker}",
-                label_visibility="collapsed",
-            )
-            st.session_state["optim_shares"][ticker] = float(new_val)
-            if c3.button("\U0001F5D1\ufe0f", key=f"del_{ticker}", help=f"Remove {ticker}"):
-                st.session_state["optim_shares"].pop(ticker, None)
-                st.session_state["analysis_ready"] = False
-                st.rerun()
+            with st.container():
+                num_key = f"num_{ticker}"
+                slide_key = f"slide_{ticker}"
+                base_val = float(st.session_state["optim_shares"].get(ticker, 10.0))
+                base_val = max(0.0, base_val)
+
+                if num_key not in st.session_state:
+                    st.session_state[num_key] = base_val
+                if slide_key not in st.session_state:
+                    st.session_state[slide_key] = base_val
+
+                sync_anchor = max(
+                    base_val,
+                    float(st.session_state.get(num_key, base_val)),
+                    float(st.session_state.get(slide_key, base_val)),
+                )
+                slider_max = max(1000.0, sync_anchor * 2.0)
+
+                c1, c2, c3 = st.columns([1.5, 2, 0.5])
+                c1.number_input(
+                    f"{ticker}",
+                    min_value=0.0,
+                    step=1.0,
+                    format="%.2f",
+                    key=num_key,
+                    on_change=_sync_from_num,
+                    args=(ticker,),
+                )
+                c2.slider(
+                    "Adjust",
+                    min_value=0.0,
+                    max_value=float(slider_max),
+                    step=1.0,
+                    key=slide_key,
+                    on_change=_sync_from_slide,
+                    args=(ticker,),
+                    label_visibility="collapsed",
+                )
+                if c3.button("\u2715", key=f"del_{ticker}", help=f"Remove {ticker}"):
+                    st.session_state["optim_shares"].pop(ticker, None)
+                    st.session_state.pop(num_key, None)
+                    st.session_state.pop(slide_key, None)
+                    st.session_state["analysis_ready"] = False
+                    st.rerun()
     edited_holdings = pd.DataFrame(
         {
             "Ticker": list(st.session_state["optim_shares"].keys()),
