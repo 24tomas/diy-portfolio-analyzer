@@ -2975,20 +2975,24 @@ with tab_opt:
         except Exception:
             pass
 
-        # 1) Max Sharpe (Mean-Variance)
+        # 1) Max Sharpe + Min Volatility (Mean-Variance)
         max_sharpe_w = _zero_weights()
+        min_vol_w = _zero_weights()
         if EfficientFrontier is not None:
             try:
-                ef = EfficientFrontier(exp_ret, cov_for_opt)
-                ef.max_sharpe(risk_free_rate=rf_float)
-                max_sharpe_w = pd.Series(ef.clean_weights(), dtype=float)
+                ef_ms = EfficientFrontier(exp_ret, cov_for_opt)
+                ef_ms.max_sharpe(risk_free_rate=rf_float)
+                max_sharpe_w = pd.Series(ef_ms.clean_weights(), dtype=float)
             except Exception:
-                try:
-                    ef = EfficientFrontier(exp_ret, cov_for_opt)
-                    ef.min_volatility()
-                    max_sharpe_w = pd.Series(ef.clean_weights(), dtype=float)
-                except Exception:
-                    max_sharpe_w = _zero_weights()
+                max_sharpe_w = _zero_weights()
+            try:
+                ef_mv = EfficientFrontier(exp_ret, cov_for_opt)
+                ef_mv.min_volatility()
+                min_vol_w = pd.Series(ef_mv.clean_weights(), dtype=float)
+            except Exception:
+                min_vol_w = _zero_weights()
+            if float(max_sharpe_w.sum()) <= 0 and float(min_vol_w.sum()) > 0:
+                max_sharpe_w = min_vol_w.copy()
 
         # 2) Risk Parity / Equal Risk Contribution
         # Flow: Library -> Scipy ERC -> 0.0
@@ -3069,6 +3073,7 @@ with tab_opt:
 
         current_w = wt.reindex(valid_tickers).fillna(0.0).astype(float)
         max_sharpe_w = _normalize_weights(max_sharpe_w)
+        min_vol_w = _normalize_weights(min_vol_w)
         risk_parity_w = _normalize_weights(risk_parity_w)
         bl_w = _normalize_weights(bl_w)
         tail_w = _normalize_weights(tail_w)
@@ -3116,6 +3121,122 @@ with tab_opt:
             hovermode="x unified",
         )
         st.plotly_chart(fig_opt, width='stretch')
+
+        st.markdown("##### Efficient Frontier (Mean-Variance)")
+
+        def _portfolio_perf(weight_series: pd.Series):
+            w_ser = weight_series.reindex(valid_tickers).fillna(0.0).astype(float)
+            w_np = w_ser.values
+            mu_np = exp_ret.reindex(valid_tickers).fillna(0.0).values
+            sigma_np = cov_for_opt.loc[valid_tickers, valid_tickers].values
+            ann_ret = float(np.dot(mu_np, w_np))
+            ann_vol = float(np.sqrt(np.maximum(w_np @ sigma_np @ w_np, 0.0)))
+            return ann_ret, ann_vol
+
+        current_ret_pt, current_vol_pt = _portfolio_perf(current_w)
+        max_sharpe_ret_pt, max_sharpe_vol_pt = _portfolio_perf(max_sharpe_w)
+        min_vol_ret_pt, min_vol_vol_pt = _portfolio_perf(min_vol_w)
+
+        frontier_vols, frontier_rets = [], []
+        if EfficientFrontier is not None:
+            max_target_ret = max(
+                float(exp_ret.max()) * 0.98,
+                max_sharpe_ret_pt,
+                min_vol_ret_pt + 1e-4,
+            )
+            target_returns = np.linspace(min_vol_ret_pt + 1e-6, max_target_ret, 80)
+            for tr in target_returns:
+                try:
+                    ef_curve = EfficientFrontier(exp_ret, cov_for_opt)
+                    ef_curve.efficient_return(target_return=float(tr))
+                    r, v, _ = ef_curve.portfolio_performance(risk_free_rate=rf_float)
+                    if np.isfinite(r) and np.isfinite(v):
+                        frontier_rets.append(float(r))
+                        frontier_vols.append(float(v))
+                except Exception:
+                    continue
+
+            # Fallback scan by risk if return-based points are sparse
+            if len(frontier_rets) < 10:
+                max_asset_vol = float(np.sqrt(np.maximum(np.diag(cov_for_opt.values), 0.0)).max())
+                risk_grid = np.linspace(
+                    max(min_vol_vol_pt + 1e-6, 1e-4),
+                    max(max_asset_vol, max_sharpe_vol_pt, min_vol_vol_pt) * 1.2,
+                    80,
+                )
+                frontier_rets, frontier_vols = [], []
+                for tv in risk_grid:
+                    try:
+                        ef_curve = EfficientFrontier(exp_ret, cov_for_opt)
+                        ef_curve.efficient_risk(target_volatility=float(tv))
+                        r, v, _ = ef_curve.portfolio_performance(risk_free_rate=rf_float)
+                        if np.isfinite(r) and np.isfinite(v):
+                            frontier_rets.append(float(r))
+                            frontier_vols.append(float(v))
+                    except Exception:
+                        continue
+
+        asset_rets = exp_ret.reindex(valid_tickers).fillna(0.0).values.astype(float)
+        asset_vols = np.sqrt(
+            np.maximum(np.diag(cov_for_opt.loc[valid_tickers, valid_tickers].values.astype(float)), 0.0)
+        )
+
+        fig_frontier = go.Figure()
+        if len(frontier_rets) >= 2:
+            fig_frontier.add_trace(go.Scatter(
+                x=frontier_vols,
+                y=frontier_rets,
+                mode="lines",
+                name="Efficient Frontier",
+                line=dict(color="rgba(230,230,230,0.85)", width=2, dash="dash"),
+            ))
+        else:
+            st.info("Efficient frontier curve could not be fully resolved for this universe.")
+
+        fig_frontier.add_trace(go.Scatter(
+            x=asset_vols,
+            y=asset_rets,
+            mode="markers",
+            name="Assets",
+            text=valid_tickers,
+            marker=dict(color="rgba(96,165,250,0.9)", size=8, line=dict(color="#A5D8FF", width=0.5)),
+            hovertemplate="<b>%{text}</b><br>Volatility: %{x:.2%}<br>Return: %{y:.2%}<extra></extra>",
+        ))
+        fig_frontier.add_trace(go.Scatter(
+            x=[current_vol_pt],
+            y=[current_ret_pt],
+            mode="markers",
+            name="Current Portfolio",
+            marker=dict(color="#FBBF24", size=16, symbol="star", line=dict(color="#FFD700", width=1)),
+            hovertemplate="<b>Current Portfolio</b><br>Volatility: %{x:.2%}<br>Return: %{y:.2%}<extra></extra>",
+        ))
+        fig_frontier.add_trace(go.Scatter(
+            x=[max_sharpe_vol_pt],
+            y=[max_sharpe_ret_pt],
+            mode="markers",
+            name="Max Sharpe Portfolio",
+            marker=dict(color="#22C55E", size=13, symbol="diamond", line=dict(color="#86EFAC", width=1)),
+            hovertemplate="<b>Max Sharpe</b><br>Volatility: %{x:.2%}<br>Return: %{y:.2%}<extra></extra>",
+        ))
+        fig_frontier.add_trace(go.Scatter(
+            x=[min_vol_vol_pt],
+            y=[min_vol_ret_pt],
+            mode="markers",
+            name="Min Volatility Portfolio",
+            marker=dict(color="#F97316", size=13, symbol="diamond", line=dict(color="#FDBA74", width=1)),
+            hovertemplate="<b>Min Volatility</b><br>Volatility: %{x:.2%}<br>Return: %{y:.2%}<extra></extra>",
+        ))
+        fig_frontier.update_layout(
+            xaxis_title="Annualized Volatility",
+            yaxis_title="Annualized Return",
+            xaxis_tickformat=".1%",
+            yaxis_tickformat=".1%",
+            legend=dict(orientation="h", y=1.02, x=0),
+            margin=dict(l=50, r=20, t=30, b=40),
+            height=520,
+            hovermode="closest",
+        )
+        st.plotly_chart(fig_frontier, width='stretch')
 
         st.markdown("##### Strategy Weights Heatmap")
         weights_matrix = opt_df.set_index("Ticker")[chart_cols]
