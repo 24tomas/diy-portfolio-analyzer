@@ -2282,17 +2282,21 @@ with tab_stress:
     st.caption("Uses separately downloaded data back to 2007.")
 
     scenarios = {
-        "Global Financial Crisis (Oct 2007 ? Mar 2009)": ("2007-10-09", "2009-03-09"),
-        "GFC ? Lehman Phase (Sep ? Nov 2008)":           ("2008-09-12", "2008-11-20"),
-        "European Debt Crisis (Apr ? Oct 2011)":         ("2011-04-29", "2011-10-03"),
-        "China Deval. / Oil Crash (Aug 2015 ? Feb 2016)": ("2015-08-10", "2016-02-11"),
-        "Vol-mageddon (Jan ? Feb 2018)":                 ("2018-01-26", "2018-02-08"),
-        "Q4 2018 Selloff (Sep ? Dec 2018)":              ("2018-09-20", "2018-12-24"),
-        "COVID Crash (Feb ? Mar 2020)":                  ("2020-02-19", "2020-03-23"),
-        "2022 Rate Shock (Jan ? Oct 2022)":              ("2022-01-03", "2022-10-12"),
-        "2023 Banking Crisis ? SVB (Mar 2023)":          ("2023-03-08", "2023-03-15"),
-        "Trump Tariffs Shock (Apr 2025)":                ("2025-04-02", "2025-04-08"),
-        "Tariff Escalation (Apr 2 ? Apr 21, 2025)":     ("2025-04-02", "2025-04-21"),
+        "Global Financial Crisis (Oct 2007 - Mar 2009)":        ("2007-10-09", "2009-03-09"),
+        "GFC - Lehman Phase (Sep - Nov 2008)":                  ("2008-09-12", "2008-11-20"),
+        "European Debt Crisis (Apr - Oct 2011)":                ("2011-04-29", "2011-10-03"),
+        "US Debt Downgrade Shock (Jul - Aug 2011)":             ("2011-07-22", "2011-08-19"),
+        "China Devaluation / Oil Crash (Aug 2015 - Feb 2016)":  ("2015-08-10", "2016-02-11"),
+        "Vol-mageddon (Jan - Feb 2018)":                        ("2018-01-26", "2018-02-08"),
+        "Q4 2018 Selloff (Sep - Dec 2018)":                     ("2018-09-20", "2018-12-24"),
+        "COVID Crash (Feb - Mar 2020)":                         ("2020-02-19", "2020-03-23"),
+        "COVID Reopening / Bond Rout (Nov 2020 - Mar 2021)":    ("2020-11-09", "2021-03-31"),
+        "2022 Rate Shock (Jan - Oct 2022)":                     ("2022-01-03", "2022-10-12"),
+        "Russia-Ukraine Invasion Shock (Feb - Mar 2022)":       ("2022-02-17", "2022-03-16"),
+        "2023 Banking Crisis - SVB to FRC (Mar - May 2023)":    ("2023-03-08", "2023-05-04"),
+        "Yen Carry Unwind Volatility Spike (Jul - Aug 2024)":   ("2024-07-10", "2024-08-08"),
+        "Trump Tariffs Shock (Apr 2025)":                       ("2025-04-02", "2025-04-08"),
+        "Tariff Escalation (Apr 2 - Apr 21, 2025)":             ("2025-04-02", "2025-04-21"),
     }
 
     sp = stress_port; sb = stress_bench
