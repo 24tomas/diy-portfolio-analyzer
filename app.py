@@ -76,6 +76,8 @@ def save_portfolios_to_disk(portfolios: dict):
 
 if "saved_portfolios" not in st.session_state:
     st.session_state["saved_portfolios"] = load_saved_portfolios()
+if "analysis_ready" not in st.session_state:
+    st.session_state["analysis_ready"] = False
 
 
 # ??????????????????????????????????????????????
@@ -99,6 +101,7 @@ with st.sidebar:
             if st.button(f"\U0001F4C2 Load '{load_choice}'", width='stretch'):
                 data = saved[load_choice]
                 st.session_state["holdings"] = pd.DataFrame(data["holdings"])
+                st.session_state["analysis_ready"] = False
                 st.rerun()
 
         # Delete
@@ -151,7 +154,7 @@ with st.sidebar:
         st.session_state["optim_shares"] = synced_shares
 
     new_ticker = st.text_input("Add Ticker", key="new_ticker_input").strip().upper()
-    if st.button("➕ Add", width='stretch'):
+    if st.button("\u2795 Add", width='stretch'):
         if not new_ticker:
             st.warning("Enter a ticker first.")
         elif new_ticker in st.session_state["optim_shares"]:
@@ -165,6 +168,8 @@ with st.sidebar:
                 ],
                 ignore_index=True,
             )
+            st.session_state["analysis_ready"] = False
+            st.session_state["new_ticker_input"] = ""
             st.success(f"Added {new_ticker} with 10 shares.")
             st.rerun()
 
@@ -172,21 +177,24 @@ with st.sidebar:
         st.info("No tickers yet. Add one above to start building your portfolio.")
     else:
         for ticker in list(st.session_state["optim_shares"].keys()):
-            with st.container():
-                st.markdown(f"**{ticker}**")
-                current_val = float(st.session_state["optim_shares"].get(ticker, 10.0))
-                current_val = min(1000.0, max(0.0, current_val))
-                slider_val = st.slider(
-                    f"Shares of {ticker}",
-                    min_value=0.0,
-                    max_value=1000.0,
-                    value=current_val,
-                    step=1.0,
-                    key=f"slider_{ticker}",
-                )
-                st.session_state["optim_shares"][ticker] = float(slider_val)
-                st.divider()
-
+            c1, c2, c3 = st.columns([2, 1, 0.6])
+            c1.markdown(f"**{ticker}**")
+            current_val = float(st.session_state["optim_shares"].get(ticker, 10.0))
+            current_val = max(0.0, current_val)
+            new_val = c2.number_input(
+                f"Shares of {ticker}",
+                min_value=0.0,
+                step=1.0,
+                format="%.2f",
+                value=current_val,
+                key=f"input_{ticker}",
+                label_visibility="collapsed",
+            )
+            st.session_state["optim_shares"][ticker] = float(new_val)
+            if c3.button("\U0001F5D1\ufe0f", key=f"del_{ticker}", help=f"Remove {ticker}"):
+                st.session_state["optim_shares"].pop(ticker, None)
+                st.session_state["analysis_ready"] = False
+                st.rerun()
     edited_holdings = pd.DataFrame(
         {
             "Ticker": list(st.session_state["optim_shares"].keys()),
@@ -260,7 +268,7 @@ with st.sidebar:
         help="Adds extra Yahoo requests per ticker. Keep off to reduce rate-limit risk.",
     )
 
-    run_btn = st.button("\U0001F680  Analyze Portfolio", type="primary", width='stretch')
+    fetch_btn = st.button("⬇️ Fetch Market Data", type="primary", width='stretch')
 
     if st.button("Clear cached data", width='stretch'):
         st.cache_data.clear()
@@ -475,11 +483,7 @@ def get_sector_map(tickers: tuple) -> dict:
 # ??????????????????????????????????????????????
 st.title("\U0001F4CA Portfolio Analysis Dashboard")
 
-if not run_btn and "port_ret" not in st.session_state:
-    st.info("\U0001F448 Enter your holdings in the sidebar, then click **Analyze Portfolio**.")
-    st.stop()
-
-if run_btn:
+if fetch_btn:
     if end_date <= start_date:
         st.error("End Date must be after Start Date.")
         st.stop()
@@ -494,11 +498,13 @@ if run_btn:
         all_tickers.append("^IRX")
 
     comp_holdings = None
+    comp_name = None
     if compare_choice and compare_choice != "None (benchmark only)":
         comp_data = st.session_state["saved_portfolios"].get(compare_choice)
         if comp_data:
             comp_holdings = pd.DataFrame(comp_data["holdings"])
             comp_holdings = validate_holdings(comp_holdings)
+            comp_name = compare_choice
             for t in comp_holdings["Ticker"]:
                 if t not in all_tickers:
                     all_tickers.append(t)
@@ -529,15 +535,19 @@ if run_btn:
     missing_tickers = [t for t in all_tickers if t not in all_prices.columns and t != "^IRX"]
     if missing_tickers:
         st.warning(
-            f"⚠️ No data found for: **{', '.join(missing_tickers)}**. "
+            f"\u26a0\ufe0f No data found for: **{', '.join(missing_tickers)}**. "
             "They have been excluded from the analysis. Please check the tickers or your date range."
         )
 
     if prices.empty:
         st.error(
-            "❌ No valid price data found for any of the provided tickers. "
+            "\u274c No valid price data found for any of the provided tickers. "
             "Please check your spelling or try a different date range."
         )
+        st.stop()
+
+    if bench not in prices.columns:
+        st.error(f"Benchmark **{bench}** has no data in the fetched range.")
         st.stop()
 
     late_start_assets = []
@@ -560,81 +570,14 @@ if run_btn:
             + ", ".join(late_start_assets)
         )
 
-    # --- Dynamic risk-free rate from 13-week T-Bill (^IRX) ---
-    static_rf_daily = (1 + risk_free_rate) ** (1 / 252) - 1
-    if use_dynamic_rf and "^IRX" in all_prices.columns:
-        irx_full = all_prices["^IRX"].ffill().bfill()
-        irx_series = irx_full.loc[prices.index] if not prices.empty else irx_full
-        dynamic_rf_daily = (1 + (irx_series / 100)) ** (1 / 252) - 1
-        dynamic_rf_daily.name = "RF_daily"
-        rf_float = float(irx_series.iloc[-1] / 100)
-        # Drop ^IRX from both price frames so it doesn't pollute portfolio calcs
-        all_prices = all_prices.drop(columns=["^IRX"])
-        prices = prices.drop(columns=["^IRX"], errors="ignore")
-    else:
-        dynamic_rf_daily = None          # placeholder, sized after port_ret is ready
-        rf_float = risk_free_rate
-        # Drop ^IRX if it was downloaded but checkbox is off
-        if "^IRX" in all_prices.columns:
-            all_prices = all_prices.drop(columns=["^IRX"])
-            prices = prices.drop(columns=["^IRX"], errors="ignore")
-
-    optim_shares = st.session_state.get("optim_shares", {})
-    port_ret, ind_ret, wt = compute_weights_and_returns(
-        prices, holdings, rebalance_freq, shares_dict=optim_shares
-    )
-
-    if bench not in prices.columns:
-        st.error(f"Benchmark **{bench}** has no data.")
-        st.stop()
-    bench_ret = prices[bench].pct_change().dropna()
-    bench_ret.name = "Benchmark"
-
-    # Comparison portfolio
-    comp_ret = None
-    comp_wt = None
-    comp_name = None
-    if comp_holdings is not None:
-        comp_ret, _, comp_wt = compute_weights_and_returns(
-            prices, comp_holdings, rebalance_freq, shares_dict=None
-        )
-        comp_ret.name = compare_choice
-        comp_name = compare_choice
-
-    # Align dates
-    common = port_ret.index.intersection(bench_ret.index)
-    port_ret = port_ret.loc[common]
-    bench_ret = bench_ret.loc[common]
-    ind_ret = ind_ret.loc[ind_ret.index.isin(common)]
-    if comp_ret is not None:
-        comp_ret = comp_ret.reindex(common).dropna()
-
-    # Finalize the daily risk-free rate Series aligned to portfolio dates
-    if dynamic_rf_daily is not None:
-        rf_series = dynamic_rf_daily.reindex(common).ffill().bfill()
-    else:
-        rf_series = pd.Series(static_rf_daily, index=common, name="RF_daily")
-
-    # Stress test data (2007+) reuses the already downloaded full history
-    stress_prices = all_prices.loc[
-        (all_prices.index >= pd.Timestamp(STRESS_START_DATE))
-        & (all_prices.index <= pd.Timestamp(end_date))
-    ].copy()
-    if not stress_prices.empty:
-        stress_port, _, _ = compute_weights_and_returns(stress_prices, holdings, rebalance_freq)
-        stress_bench = stress_prices[bench].pct_change().dropna() if bench in stress_prices.columns else pd.Series(dtype=float)
-    else:
-        stress_port = pd.Series(dtype=float)
-        stress_bench = pd.Series(dtype=float)
-
-    # Fama-French factors ? separate source (Ken French website), no Yahoo
+    # Fama-French factors - separate source (Ken French website), no Yahoo
     try:
         ff_factors = download_fama_french()
     except Exception as e:
         st.warning(f"\u26a0\ufe0f  Could not download Fama-French factors: {e}")
         ff_factors = pd.DataFrame()
 
-    # Sector map ? cached, only portfolio tickers (not benchmark)
+    # Sector map - cached, only portfolio tickers (not benchmark)
     portfolio_tickers = tuple(sorted(holdings["Ticker"].tolist()))
     if fetch_sector_data:
         try:
@@ -644,17 +587,150 @@ if run_btn:
     else:
         sector_map = {t: {"sector": "Unknown", "industry": "Unknown"} for t in portfolio_tickers}
 
-    # Store everything
-    for k, v in {
-        "port_ret": port_ret, "bench_ret": bench_ret, "ind_ret": ind_ret,
-        "weights": wt, "bench": bench, "rf": risk_free_rate,
-        "rf_series": rf_series, "rf_float": rf_float,
-        "holdings": holdings, "prices": prices,
-        "stress_port": stress_port, "stress_bench": stress_bench,
-        "comp_ret": comp_ret, "comp_wt": comp_wt, "comp_name": comp_name,
-        "ff_factors": ff_factors, "sector_map": sector_map,
-    }.items():
-        st.session_state[k] = v
+    st.session_state["analysis_ready"] = True
+    st.session_state["fetched_all_prices"] = all_prices
+    st.session_state["fetched_first_valid_dates"] = first_valid_dates
+    st.session_state["fetched_comp_holdings"] = comp_holdings
+    st.session_state["fetched_comp_name"] = comp_name
+    st.session_state["fetched_bench"] = bench
+    st.session_state["fetched_portfolio_tickers"] = tuple(sorted(holdings["Ticker"].tolist()))
+    st.session_state["ff_factors"] = ff_factors
+    st.session_state["sector_map"] = sector_map
+
+if not st.session_state.get("analysis_ready", False):
+    st.info("\U0001F448 Please define your portfolio and click **Fetch Market Data** to begin.")
+    st.stop()
+
+holdings = validate_holdings(edited_holdings)
+current_tickers = tuple(sorted(holdings["Ticker"].tolist()))
+fetched_tickers = tuple(sorted(st.session_state.get("fetched_portfolio_tickers", ())))
+if fetched_tickers and current_tickers != fetched_tickers:
+    st.session_state["analysis_ready"] = False
+    st.info("Portfolio tickers changed. Click **Fetch Market Data** to refresh prices.")
+    st.stop()
+st.session_state["holdings"] = holdings
+
+all_prices = st.session_state.get("fetched_all_prices", pd.DataFrame()).copy()
+if all_prices.empty:
+    st.session_state["analysis_ready"] = False
+    st.info("\U0001F448 Please define your portfolio and click **Fetch Market Data** to begin.")
+    st.stop()
+
+bench = st.session_state.get("fetched_bench", benchmark_ticker.strip().upper())
+comp_holdings = st.session_state.get("fetched_comp_holdings")
+comp_name = st.session_state.get("fetched_comp_name")
+first_valid_dates = st.session_state.get("fetched_first_valid_dates", {})
+
+prices = all_prices.loc[
+    (all_prices.index >= pd.Timestamp(start_date))
+    & (all_prices.index <= pd.Timestamp(end_date))
+].copy()
+if prices.empty:
+    st.error("No data available in this date range from the cached dataset. Click **Fetch Market Data**.")
+    st.stop()
+
+late_start_assets = []
+late_start_threshold = pd.Timestamp(start_date) + pd.Timedelta(days=30)
+for t in holdings["Ticker"].tolist():
+    first_dt = first_valid_dates.get(t)
+    if first_dt is None:
+        continue
+    try:
+        first_ts = pd.Timestamp(first_dt)
+    except Exception:
+        continue
+    if pd.notna(first_ts) and first_ts > late_start_threshold:
+        late_start_assets.append(f"{t} ({first_ts.strftime('%Y-%m-%d')})")
+
+if late_start_assets:
+    st.warning(
+        "Note: The following assets did not trade for the entire backtest period. "
+        "Their earliest available price was assumed constant (0% return) prior to their inception: "
+        + ", ".join(late_start_assets)
+    )
+
+# --- Dynamic risk-free rate from 13-week T-Bill (^IRX) ---
+static_rf_daily = (1 + risk_free_rate) ** (1 / 252) - 1
+if use_dynamic_rf and "^IRX" in all_prices.columns:
+    irx_full = all_prices["^IRX"].ffill().bfill()
+    irx_series = irx_full.loc[prices.index] if not prices.empty else irx_full
+    dynamic_rf_daily = (1 + (irx_series / 100)) ** (1 / 252) - 1
+    dynamic_rf_daily.name = "RF_daily"
+    rf_float = float(irx_series.iloc[-1] / 100)
+    all_prices_no_irx = all_prices.drop(columns=["^IRX"])
+    prices = prices.drop(columns=["^IRX"], errors="ignore")
+else:
+    dynamic_rf_daily = None
+    rf_float = risk_free_rate
+    all_prices_no_irx = all_prices.drop(columns=["^IRX"], errors="ignore")
+    prices = prices.drop(columns=["^IRX"], errors="ignore")
+
+if bench not in prices.columns:
+    st.error(f"Benchmark **{bench}** has no data.")
+    st.stop()
+
+optim_shares = st.session_state.get("optim_shares", {})
+port_ret, ind_ret, wt = compute_weights_and_returns(
+    prices, holdings, rebalance_freq, shares_dict=optim_shares
+)
+bench_ret = prices[bench].pct_change().dropna()
+bench_ret.name = "Benchmark"
+
+# Comparison portfolio
+comp_ret = None
+comp_wt = None
+if comp_holdings is not None:
+    comp_ret, _, comp_wt = compute_weights_and_returns(
+        prices, comp_holdings, rebalance_freq, shares_dict=None
+    )
+    comp_ret.name = comp_name
+
+# Align dates
+common = port_ret.index.intersection(bench_ret.index)
+port_ret = port_ret.loc[common]
+bench_ret = bench_ret.loc[common]
+ind_ret = ind_ret.loc[ind_ret.index.isin(common)]
+if comp_ret is not None:
+    comp_ret = comp_ret.reindex(common).dropna()
+
+# Finalize the daily risk-free rate Series aligned to portfolio dates
+if dynamic_rf_daily is not None:
+    rf_series = dynamic_rf_daily.reindex(common).ffill().bfill()
+else:
+    rf_series = pd.Series(static_rf_daily, index=common, name="RF_daily")
+
+# Stress test data (2007+) reuses the already downloaded full history
+stress_prices = all_prices_no_irx.loc[
+    (all_prices_no_irx.index >= pd.Timestamp(STRESS_START_DATE))
+    & (all_prices_no_irx.index <= pd.Timestamp(end_date))
+].copy()
+if not stress_prices.empty:
+    stress_port, _, _ = compute_weights_and_returns(
+        stress_prices, holdings, rebalance_freq, shares_dict=optim_shares
+    )
+    stress_bench = (
+        stress_prices[bench].pct_change().dropna()
+        if bench in stress_prices.columns
+        else pd.Series(dtype=float)
+    )
+else:
+    stress_port = pd.Series(dtype=float)
+    stress_bench = pd.Series(dtype=float)
+
+ff_factors = st.session_state.get("ff_factors", pd.DataFrame())
+sector_map = st.session_state.get("sector_map", {})
+
+# Store everything
+for k, v in {
+    "port_ret": port_ret, "bench_ret": bench_ret, "ind_ret": ind_ret,
+    "weights": wt, "bench": bench, "rf": risk_free_rate,
+    "rf_series": rf_series, "rf_float": rf_float,
+    "holdings": holdings, "prices": prices,
+    "stress_port": stress_port, "stress_bench": stress_bench,
+    "comp_ret": comp_ret, "comp_wt": comp_wt, "comp_name": comp_name,
+    "ff_factors": ff_factors, "sector_map": sector_map,
+}.items():
+    st.session_state[k] = v
 
 # ?? Retrieve ??
 port_ret     = st.session_state["port_ret"]
