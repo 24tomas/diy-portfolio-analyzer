@@ -2187,14 +2187,20 @@ with tab_opt:
         st.dataframe(dom_df, width='stretch', hide_index=True)
 # ==================== TAB 7 - MONTE CARLO SIMULATION ====================
 with tab_mc:
-    st.subheader("Monte Carlo Simulation (Correlated GBM)")
+    st.subheader("Monte Carlo Simulation")
 
-    mc1, mc2, mc3 = st.columns(3)
+    mc1, mc2, mc3, mc4 = st.columns(4)
     with mc1:
-        sim_count = st.slider("Simulation Count", min_value=500, max_value=5000, value=1000, step=100)
+        sim_method = st.selectbox(
+            "Simulation Method",
+            options=["GBM (Parametric)", "Historical Bootstrapping (Non-Parametric)"],
+            help="GBM assumes normal distribution. Bootstrapping samples actual historical returns, preserving fat tails and real correlations.",
+        )
     with mc2:
-        horizon_years = st.slider("Forecast Horizon (Years)", min_value=1, max_value=10, value=5, step=1)
+        sim_count = st.slider("Simulation Count", min_value=500, max_value=5000, value=1000, step=100)
     with mc3:
+        horizon_years = st.slider("Forecast Horizon (Years)", min_value=1, max_value=10, value=5, step=1)
+    with mc4:
         initial_investment = st.number_input(
             "Initial Investment", min_value=100.0, value=10000.0, step=500.0, format="%.2f"
         )
@@ -2221,21 +2227,29 @@ with tab_mc:
             var_diag = np.clip(np.diag(cov_ann), 0.0, None)
             drift = (mu_ann - 0.5 * var_diag) * dt
 
-            eye = np.eye(n_assets)
-            jitter = 1e-12
+            hist_returns = None
+            n_hist_days = 0
             chol = None
-            for _ in range(8):
-                try:
-                    if HAS_SCIPY and sp_cholesky is not None:
-                        chol = sp_cholesky(cov_ann + jitter * eye, lower=True, check_finite=False)
-                    else:
-                        chol = np.linalg.cholesky(cov_ann + jitter * eye)
-                    break
-                except Exception:
-                    jitter *= 10
-
-            if chol is None:
-                raise ValueError("Cholesky decomposition failed for covariance matrix.")
+            if sim_method == "Historical Bootstrapping (Non-Parametric)":
+                hist_returns = ind_ret[valid_tickers].values.astype(float)
+                hist_returns = np.nan_to_num(hist_returns, nan=0.0, posinf=0.0, neginf=0.0)
+                n_hist_days = len(hist_returns)
+                if n_hist_days < 2:
+                    raise ValueError("Not enough historical return observations for bootstrapping.")
+            else:
+                eye = np.eye(n_assets)
+                jitter = 1e-12
+                for _ in range(8):
+                    try:
+                        if HAS_SCIPY and sp_cholesky is not None:
+                            chol = sp_cholesky(cov_ann + jitter * eye, lower=True, check_finite=False)
+                        else:
+                            chol = np.linalg.cholesky(cov_ann + jitter * eye)
+                        break
+                    except Exception:
+                        jitter *= 10
+                if chol is None:
+                    raise ValueError("Cholesky decomposition failed for covariance matrix.")
 
             rng = np.random.default_rng(42)
             asset_values = (initial_investment * w_mc)[:, None] * np.ones((n_assets, sim_count), dtype=float)
@@ -2244,10 +2258,15 @@ with tab_mc:
 
             with st.spinner("Running correlated Monte Carlo simulation..."):
                 for t in range(1, steps + 1):
-                    z = rng.standard_normal((n_assets, sim_count))
-                    corr_shocks = chol @ z
-                    log_returns = drift[:, None] + sqrt_dt * corr_shocks
-                    asset_values *= np.exp(log_returns)
+                    if sim_method == "GBM (Parametric)":
+                        z = rng.standard_normal((n_assets, sim_count))
+                        corr_shocks = chol @ z
+                        log_returns = drift[:, None] + sqrt_dt * corr_shocks
+                        asset_values *= np.exp(log_returns)
+                    else:
+                        step_idx = rng.integers(0, n_hist_days, size=sim_count)
+                        sampled_rets = hist_returns[step_idx, :]  # (sim_count, n_assets)
+                        asset_values *= (1 + sampled_rets.T)      # (n_assets, sim_count)
                     port_paths[t, :] = asset_values.sum(axis=0)
 
             years_axis = np.arange(steps + 1) / 252.0
@@ -2285,7 +2304,7 @@ with tab_mc:
                 line=dict(color="#2CA02C", width=3),
             ))
             fig_mc.update_layout(
-                title="Correlated Monte Carlo Forecast (GBM with Cholesky)",
+                title=f"Monte Carlo Forecast - {sim_method}",
                 xaxis_title="Years Ahead",
                 yaxis_title="Portfolio Value",
                 yaxis_tickprefix="$",
