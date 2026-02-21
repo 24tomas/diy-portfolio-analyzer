@@ -21,6 +21,12 @@ import plotly.io as pio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 try:
+    from pandas_datareader import data as web
+    HAS_PDR = True
+except Exception:
+    web = None
+    HAS_PDR = False
+try:
     import pypfopt
     HAS_PYPFOPT = True
 except Exception:
@@ -809,6 +815,38 @@ def download_fama_french() -> pd.DataFrame:
     return ff_df
 
 
+@st.cache_data(show_spinner="\U0001F30D Downloading macro data (FRED) \u2026", ttl=86400, persist="disk", max_entries=64)
+def fetch_macro_data(start_date, end_date) -> pd.DataFrame:
+    """
+    Fetch macro series from FRED and align to daily frequency:
+    - CPIAUCSL -> YoY inflation rate (%)
+    - FEDFUNDS -> effective fed funds rate (%)
+    """
+    if not HAS_PDR or web is None:
+        raise RuntimeError("pandas_datareader is not installed in this runtime.")
+
+    start_ts = pd.Timestamp(start_date) - pd.Timedelta(days=400)
+    end_ts = pd.Timestamp(end_date)
+
+    cpi = web.DataReader("CPIAUCSL", "fred", start_ts, end_ts)
+    fed = web.DataReader("FEDFUNDS", "fred", start_ts, end_ts)
+
+    macro = pd.concat([cpi, fed], axis=1).sort_index()
+    macro.columns = ["CPIAUCSL", "FEDFUNDS"]
+    macro = macro.apply(pd.to_numeric, errors="coerce").ffill()
+    macro["Inflation_YoY"] = macro["CPIAUCSL"].pct_change(12) * 100.0
+    macro = macro[["Inflation_YoY", "FEDFUNDS"]]
+
+    if macro.dropna(how="all").empty:
+        raise RuntimeError("FRED returned no usable macro data.")
+
+    # FRED is typically monthly; forward-fill to daily for return alignment.
+    daily_idx = pd.date_range(start=macro.index.min(), end=end_ts, freq="D")
+    macro_daily = macro.reindex(daily_idx).ffill()
+    macro_daily.index.name = "Date"
+    return macro_daily
+
+
 @st.cache_data(show_spinner="\U0001F3E2 Looking up ticker metadata \u2026", ttl=7 * 86400, persist="disk", max_entries=256)
 def get_ticker_metadata(tickers: tuple) -> dict:
     """
@@ -1314,6 +1352,19 @@ if dynamic_rf_daily is not None:
 else:
     rf_series = pd.Series(static_rf_daily, index=common, name="RF_daily")
 
+# Macro data from FRED aligned to daily portfolio/benchmark dates.
+macro_df = pd.DataFrame(index=common, columns=["Inflation_YoY", "FEDFUNDS"], dtype=float)
+if len(common) > 0:
+    try:
+        macro_raw = fetch_macro_data(common.min().date(), common.max().date())
+        macro_df = macro_raw.reindex(common).ffill()
+    except Exception as e:
+        st.warning(f"\u26a0\ufe0f Could not fetch macro data from FRED: {e}")
+        macro_df = pd.DataFrame(
+            {"Inflation_YoY": np.nan, "FEDFUNDS": np.nan},
+            index=common,
+        )
+
 # Stress test data (2007+) reuses the already downloaded full history
 stress_prices = all_prices_no_irx.loc[
     (all_prices_no_irx.index >= pd.Timestamp(STRESS_START_DATE))
@@ -1346,6 +1397,7 @@ for k, v in {
     "port_ret": port_ret, "bench_ret": bench_ret, "ind_ret": ind_ret,
     "weights": wt, "bench": bench, "rf": risk_free_rate,
     "rf_series": rf_series, "rf_float": rf_float,
+    "macro_df": macro_df,
     "holdings": holdings, "prices": prices,
     "stress_port": stress_port, "stress_bench": stress_bench,
     "comp_ret": comp_ret, "comp_wt": comp_wt, "comp_name": comp_name,
@@ -1372,6 +1424,7 @@ comp_wt      = st.session_state.get("comp_wt")
 comp_name    = st.session_state.get("comp_name")
 ff_factors   = st.session_state.get("ff_factors", pd.DataFrame())
 sector_map   = st.session_state.get("sector_map", {})
+macro_df     = st.session_state.get("macro_df", pd.DataFrame(index=port_ret.index))
 analysis_start = st.session_state.get("analysis_start", data_min)
 analysis_end = st.session_state.get("analysis_end", data_max)
 input_mode = st.session_state.get("input_mode", "Shares")
@@ -1503,9 +1556,9 @@ st.divider()
 # ??????????????????????????????????????????????
 asset_count_for_ui = len([t for t in wt.index if t in prices.columns])
 compact_legends = asset_count_for_ui > 15
-tab_perf, tab_risk, tab_factor, tab_dd, tab_stress, tab_opt, tab_mc = st.tabs(
+tab_perf, tab_risk, tab_factor, tab_dd, tab_stress, tab_macro, tab_opt, tab_mc = st.tabs(
     ["\U0001F4C8 Performance", "\u2696\ufe0f Risk & Concentration", "\U0001F52C Factor Exposure",
-     "\U0001F4C9 Drawdowns", "\U0001F9EA Stress Tests", "\U0001F3AF Optimization", "\U0001F3B2 Monte Carlo"]
+     "\U0001F4C9 Drawdowns", "\U0001F9EA Stress Tests", "\U0001F30D Macro Regimes", "\U0001F3AF Optimization", "\U0001F3B2 Monte Carlo"]
 )
 
 
@@ -2831,7 +2884,120 @@ with tab_stress:
 
 # ??????????????????????????????????????????????
 
-# ==================== TAB 6 - OPTIMIZATION ====================
+# ==================== TAB 6 - MACRO REGIMES ====================
+with tab_macro:
+    st.subheader("Macro Regime Analysis")
+    st.caption(
+        "Evaluates portfolio and benchmark behavior across inflation and policy-rate "
+        "environments using FRED CPI and Fed Funds data."
+    )
+
+    if macro_df is None or macro_df.empty:
+        st.info("Macro data is unavailable for this analysis window.")
+    else:
+        macro_aligned = macro_df.reindex(port_ret.index).ffill()
+        if macro_aligned.empty:
+            st.info("Macro data is unavailable for this analysis window.")
+        else:
+            inflation_yoy = pd.to_numeric(macro_aligned.get("Inflation_YoY"), errors="coerce")
+            fedfunds = pd.to_numeric(macro_aligned.get("FEDFUNDS"), errors="coerce")
+            fedfunds_60d = fedfunds.shift(60)
+
+            regime_masks = {
+                "High Inflation": inflation_yoy > 3.0,
+                "Low/Normal Inflation": inflation_yoy <= 3.0,
+                "Rising Rates": fedfunds > fedfunds_60d,
+                "Falling/Flat Rates": fedfunds <= fedfunds_60d,
+            }
+
+            regime_rows = []
+            regime_labels = []
+            regime_port_returns = []
+            regime_bench_returns = []
+
+            for regime_name, mask in regime_masks.items():
+                mask = mask.fillna(False)
+                r_port = port_ret.loc[mask]
+                r_bench = bench_ret.loc[mask]
+                obs = int(mask.sum())
+
+                if len(r_port) >= 2 and len(r_bench) >= 2:
+                    p_ann_ret = annualized_return(r_port)
+                    p_ann_vol = annualized_vol(r_port)
+                    p_mdd = max_drawdown(r_port)
+
+                    b_ann_ret = annualized_return(r_bench)
+                    b_ann_vol = annualized_vol(r_bench)
+                    b_mdd = max_drawdown(r_bench)
+                else:
+                    p_ann_ret = np.nan
+                    p_ann_vol = np.nan
+                    p_mdd = np.nan
+                    b_ann_ret = np.nan
+                    b_ann_vol = np.nan
+                    b_mdd = np.nan
+
+                regime_rows.append(
+                    {
+                        "Regime": regime_name,
+                        "Observations": obs,
+                        "Portfolio Ann. Return": p_ann_ret,
+                        "Portfolio Ann. Volatility": p_ann_vol,
+                        "Portfolio Max Drawdown": p_mdd,
+                        f"Benchmark ({bench}) Ann. Return": b_ann_ret,
+                        f"Benchmark ({bench}) Ann. Volatility": b_ann_vol,
+                        f"Benchmark ({bench}) Max Drawdown": b_mdd,
+                    }
+                )
+                regime_labels.append(regime_name)
+                regime_port_returns.append(p_ann_ret)
+                regime_bench_returns.append(b_ann_ret)
+
+            regime_df = pd.DataFrame(regime_rows)
+            pct_cols = [
+                "Portfolio Ann. Return",
+                "Portfolio Ann. Volatility",
+                "Portfolio Max Drawdown",
+                f"Benchmark ({bench}) Ann. Return",
+                f"Benchmark ({bench}) Ann. Volatility",
+                f"Benchmark ({bench}) Max Drawdown",
+            ]
+            fmt_map = {col: (lambda v: "N/A" if pd.isna(v) else f"{v:.2%}") for col in pct_cols}
+            regime_styled = regime_df.style.format(fmt_map)
+            st.dataframe(regime_styled, width='stretch', hide_index=True)
+
+            fig_regime = go.Figure()
+            fig_regime.add_trace(
+                go.Bar(
+                    x=regime_labels,
+                    y=regime_port_returns,
+                    name="Portfolio",
+                    marker_color="#636EFA",
+                    hovertemplate="<b>%{x}</b><br>Portfolio Ann. Return: %{y:.2%}<extra></extra>",
+                )
+            )
+            fig_regime.add_trace(
+                go.Bar(
+                    x=regime_labels,
+                    y=regime_bench_returns,
+                    name=f"Benchmark ({bench})",
+                    marker_color="#EF553B",
+                    hovertemplate=f"<b>%{{x}}</b><br>Benchmark ({bench}) Ann. Return: %{{y:.2%}}<extra></extra>",
+                )
+            )
+            fig_regime.update_layout(
+                barmode="group",
+                xaxis_title="Macro Regime",
+                yaxis_title="Annualized Return",
+                yaxis_tickformat=".1%",
+                legend=dict(orientation="h", y=1.02, x=0),
+                margin=dict(l=40, r=20, t=30, b=40),
+                height=420,
+            )
+            st.plotly_chart(fig_regime, width='stretch')
+
+
+# ==================== TAB 7 - OPTIMIZATION ====================
 with tab_opt:
     st.subheader("Optimization: Robust Portfolio Construction")
     st.caption(
