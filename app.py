@@ -1603,7 +1603,40 @@ with tab_dd:
     recov_val   = qs.stats.recovery_factor(port_ret)
     tail_ratio  = qs.stats.tail_ratio(port_ret)
 
-    dr1, dr2, dr3, dr4 = st.columns(4)
+    try:
+        from scipy import stats as sp_stats
+    except Exception:
+        sp_stats = None
+
+    if sp_stats is not None:
+        z = sp_stats.norm.ppf(0.05)
+
+        # Portfolio Modified VaR (Cornish-Fisher)
+        S_p = skew_val
+        K_p = kurt_val
+        z_cf_p = (
+            z
+            + (1 / 6) * (z**2 - 1) * S_p
+            + (1 / 24) * (z**3 - 3 * z) * K_p
+            - (1 / 36) * (2 * z**3 - 5 * z) * (S_p**2)
+        )
+        mod_var_95_p = float(port_ret.mean() + z_cf_p * port_ret.std())
+
+        # Benchmark Modified VaR (Cornish-Fisher)
+        S_b = qs.stats.skew(bench_ret)
+        K_b = qs.stats.kurtosis(bench_ret)
+        z_cf_b = (
+            z
+            + (1 / 6) * (z**2 - 1) * S_b
+            + (1 / 24) * (z**3 - 3 * z) * K_b
+            - (1 / 36) * (2 * z**3 - 5 * z) * (S_b**2)
+        )
+        mod_var_95_b = float(bench_ret.mean() + z_cf_b * bench_ret.std())
+    else:
+        mod_var_95_p = np.nan
+        mod_var_95_b = np.nan
+
+    dr1, dr2, dr3, dr4, dr5 = st.columns(5)
     dr1.metric("Max Drawdown", f"{mdd_val:.2%}",
                delta=f"{mdd_val - mdd_bench:+.2%} vs {bench}",
                delta_color="inverse",
@@ -1614,6 +1647,11 @@ with tab_dd:
                help="Value at Risk ? threshold below which the worst 5% of days fall.")
     dr4.metric("Calmar Ratio", f"{calmar_val:.2f}",
                help="CAGR ? Max Drawdown. Higher = better risk-adjusted returns.")
+    dr5.metric(
+        "Modified VaR (95%)",
+        f"{mod_var_95_p:.2%}",
+        help="Cornish-Fisher VaR. Adjusts standard VaR for Skewness and Kurtosis (fat tails).",
+    )
 
     # CVaR plain-English explanation
     st.info(
@@ -1793,7 +1831,7 @@ with tab_dd:
     risk_stats = {
         "Metric": [
             "Max Drawdown", "Avg. Drawdown",
-            "VaR (95%)", "VaR (99%)",
+            "VaR (95%)", "Modified VaR (95%)", "VaR (99%)",
             "CVaR (95%)", "CVaR (99%)",
             "Skewness", "Excess Kurtosis", "Tail Ratio",
             "Calmar Ratio", "Ulcer Index", "Recovery Factor",
@@ -1803,6 +1841,7 @@ with tab_dd:
             f"{mdd_val:.2%}",
             f"{dd_series[dd_series < 0].mean():.2%}" if (dd_series < 0).any() else "0.00%",
             f"{var_95:.2%}",
+            f"{mod_var_95_p:.2%}",
             f"{qs.stats.value_at_risk(port_ret, confidence=0.99):.2%}",
             f"{cvar_95:.2%}",
             f"{cvar_99:.2%}",
@@ -1818,6 +1857,7 @@ with tab_dd:
             f"{mdd_bench:.2%}",
             f"{dd_bench[dd_bench < 0].mean():.2%}" if (dd_bench < 0).any() else "0.00%",
             f"{qs.stats.value_at_risk(bench_ret, confidence=0.95):.2%}",
+            f"{mod_var_95_b:.2%}",
             f"{qs.stats.value_at_risk(bench_ret, confidence=0.99):.2%}",
             f"{qs.stats.cvar(bench_ret, confidence=0.95):.2%}",
             f"{qs.stats.cvar(bench_ret, confidence=0.99):.2%}",
