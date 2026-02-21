@@ -48,19 +48,19 @@ except Exception:
     sp_opt = None
     HAS_SCIPY_OPT = False
 
-# ──────────────────────────────────────────────
+# ??????????????????????????????????????????????
 # 1. PAGE CONFIG
-# ──────────────────────────────────────────────
+# ??????????????????????????????????????????????
 st.set_page_config(
     page_title="Portfolio Analyzer",
-    page_icon="📊",
+    page_icon="\U0001F4CA",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ──────────────────────────────────────────────
+# ??????????????????????????????????????????????
 # 2. PORTFOLIO STORAGE (JSON file on disk)
-# ──────────────────────────────────────────────
+# ??????????????????????????????????????????????
 PORTFOLIO_FILE = "saved_portfolios.json"
 STRESS_START_DATE = date(2007, 1, 1)
 
@@ -78,13 +78,13 @@ if "saved_portfolios" not in st.session_state:
     st.session_state["saved_portfolios"] = load_saved_portfolios()
 
 
-# ──────────────────────────────────────────────
+# ??????????????????????????????????????????????
 # 3. SIDEBAR
-# ──────────────────────────────────────────────
+# ??????????????????????????????????????????????
 with st.sidebar:
 
-    # —— 3a. Portfolio manager —————————————————————————
-    st.header("💾 Portfolio Manager")
+    # ?? 3a. Portfolio manager ?????????????????????????
+    st.header("\U0001F4BE Portfolio Manager")
     saved = st.session_state["saved_portfolios"]
     portfolio_names = list(saved.keys())
 
@@ -92,22 +92,22 @@ with st.sidebar:
     if portfolio_names:
         load_choice = st.selectbox(
             "Load saved portfolio",
-            options=["— New portfolio —"] + portfolio_names,
+            options=["\u2014 New portfolio \u2014"] + portfolio_names,
             key="load_choice",
         )
-        if load_choice != "— New portfolio —":
-            if st.button(f"📂 Load '{load_choice}'", width='stretch'):
+        if load_choice != "\u2014 New portfolio \u2014":
+            if st.button(f"\U0001F4C2 Load '{load_choice}'", width='stretch'):
                 data = saved[load_choice]
                 st.session_state["holdings"] = pd.DataFrame(data["holdings"])
                 st.rerun()
 
         # Delete
         del_choice = st.selectbox(
-            "Delete a portfolio", options=["—"] + portfolio_names,
+            "Delete a portfolio", options=["\u2014"] + portfolio_names,
             key="del_choice",
         )
-        if del_choice != "—":
-            if st.button(f"🗑️ Delete '{del_choice}'", width='stretch'):
+        if del_choice != "\u2014":
+            if st.button(f"\U0001F5D1\ufe0f Delete '{del_choice}'", width='stretch'):
                 del st.session_state["saved_portfolios"][del_choice]
                 save_portfolios_to_disk(st.session_state["saved_portfolios"])
                 st.rerun()
@@ -116,8 +116,8 @@ with st.sidebar:
 
     st.divider()
 
-    # —— 3b. Holdings editor —————————————————————————
-    st.header("📁 Portfolio Holdings")
+    # ?? 3b. Holdings editor ???????????????????????????
+    st.header("\U0001F4C1 Portfolio Holdings")
     st.caption("Enter tickers and how many shares you own.")
 
     if "holdings" not in st.session_state:
@@ -142,7 +142,7 @@ with st.sidebar:
 
     # Save current portfolio
     save_name = st.text_input("Save current portfolio as", key="save_name_input")
-    if st.button("💾 Save Portfolio", width='stretch'):
+    if st.button("\U0001F4BE Save Portfolio", width='stretch'):
         name = save_name.strip()
         if not name:
             st.warning("Enter a name first.")
@@ -156,14 +156,14 @@ with st.sidebar:
 
     st.divider()
 
-    # —— 3c. Compare with another portfolio —————————————————————————
-    st.header("🔀 Compare Portfolios")
+    # ?? 3c. Compare with another portfolio ????????????
+    st.header("\U0001F500 Compare Portfolios")
     compare_options = ["None (benchmark only)"] + portfolio_names
     compare_choice = st.selectbox("Compare with", options=compare_options, key="compare_sel")
 
     st.divider()
 
-    # —— 3d. Date range, benchmark, rf —————————————————————————
+    # ?? 3d. Date range, benchmark, rf ?????????????????
     col1, col2 = st.columns(2)
     with col1:
         start_date = st.date_input("Start Date",
@@ -174,8 +174,24 @@ with st.sidebar:
     benchmark_ticker = st.text_input("Benchmark", value="SPY",
                                      help="Used for comparison in charts and factor analysis")
 
-    risk_free_rate = st.number_input("Risk-Free Rate (%)", min_value=0.0,
-                                     max_value=20.0, value=4.5, step=0.1) / 100
+    use_dynamic_rf = st.checkbox(
+        "Use Dynamic Risk-Free Rate (^IRX)", value=True,
+        help="Downloads 13-week T-Bill yields to calculate daily dynamic "
+             "risk-free rates. Falls back to the static rate below on failure.",
+    )
+    risk_free_rate = st.number_input(
+        "Static Risk-Free Rate Fallback (%)", min_value=0.0,
+        max_value=20.0, value=4.5, step=0.1) / 100
+
+    rebalance_freq = st.selectbox(
+        "Rebalancing Frequency",
+        options=["Buy & Hold", "Monthly", "Quarterly", "Annually",
+                 "Daily (Constant Weights)"],
+        index=0,
+        help="How often the portfolio is rebalanced back to target weights. "
+             "'Buy & Hold' simulates no rebalancing after initial allocation; "
+             "'Daily' assumes constant weights (original behavior).",
+    )
 
     fetch_sector_data = st.checkbox(
         "Fetch sector/industry metadata",
@@ -183,16 +199,16 @@ with st.sidebar:
         help="Adds extra Yahoo requests per ticker. Keep off to reduce rate-limit risk.",
     )
 
-    run_btn = st.button("🚀  Analyze Portfolio", type="primary", width='stretch')
+    run_btn = st.button("\U0001F680  Analyze Portfolio", type="primary", width='stretch')
 
     if st.button("Clear cached data", width='stretch'):
         st.cache_data.clear()
         st.success("Cleared Streamlit cached data.")
 
 
-# ──────────────────────────────────────────────
+# ??????????????????????????????????????????????
 # 4. HELPERS
-# ──────────────────────────────────────────────
+# ??????????????????????????????????????????????
 def validate_holdings(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy().dropna(subset=["Ticker", "Shares"])
     df["Ticker"] = df["Ticker"].str.strip().str.upper()
@@ -200,7 +216,7 @@ def validate_holdings(df: pd.DataFrame) -> pd.DataFrame:
     df = df[df["Shares"] > 0]
     df = df.groupby("Ticker", as_index=False)["Shares"].sum()
     if df.empty:
-        st.error("⚠️  Add at least one valid holding.")
+        st.error("\u26a0\ufe0f  Add at least one valid holding.")
         st.stop()
     return df.reset_index(drop=True)
 
@@ -248,11 +264,22 @@ def download_prices(tickers: tuple, start, end, max_retries=5):
     return prices
 
 
-def compute_weights_and_returns(prices, holdings):
+def compute_weights_and_returns(prices, holdings, rebalance_freq="Daily (Constant Weights)"):
+    """Compute portfolio returns via a proper backtest simulation.
+
+    Target weights are derived from the user's current shares and the latest
+    available price.  Historical returns are then simulated by investing
+    hypothetical capital ($10,000) according to the chosen rebalancing
+    strategy, eliminating look-ahead bias from constant-weight assumptions.
+    """
+    INITIAL_CAPITAL = 10_000.0
+
     valid = holdings[holdings["Ticker"].isin(prices.columns)].copy()
     if valid.empty:
-        st.error("❌  None of the tickers have price data.")
+        st.error("\u274c  None of the tickers have price data.")
         st.stop()
+
+    # Target weights from latest prices and shares
     latest = prices.iloc[-1]
     valid["Price"] = valid["Ticker"].map(latest)
     valid["Value"] = valid["Shares"] * valid["Price"]
@@ -260,13 +287,58 @@ def compute_weights_and_returns(prices, holdings):
     valid["Weight"] = valid["Value"] / total
     tickers = valid["Ticker"].tolist()
     w = valid["Weight"].values
+
     ind_ret = prices[tickers].pct_change().dropna()
-    port_ret = ind_ret.dot(w)
+
+    if rebalance_freq == "Daily (Constant Weights)":
+        # Original logic: weights are held constant every day (daily rebalance)
+        port_ret = ind_ret.dot(w)
+
+    elif rebalance_freq == "Buy & Hold":
+        # Allocate starting capital on day 1, then let positions drift
+        asset_prices = prices[tickers]
+        initial_prices = asset_prices.iloc[0].values
+        shares = (INITIAL_CAPITAL * w) / initial_prices
+        port_value = asset_prices.multiply(shares, axis=1).sum(axis=1)
+        port_ret = port_value.pct_change().dropna()
+
+    else:
+        # Periodic rebalancing: Monthly, Quarterly, Annually
+        freq_map = {"Monthly": "M", "Quarterly": "Q", "Annually": "Y"}
+        freq = freq_map[rebalance_freq]
+
+        asset_prices = prices[tickers]
+        dates = asset_prices.index
+        price_arr = asset_prices.values          # (T, N)
+        n_days = len(dates)
+
+        # Determine segment boundaries (each rebalance period)
+        period_codes = dates.to_period(freq).asi8
+        changes = np.diff(period_codes) != 0
+        boundaries = np.flatnonzero(changes) + 1
+        seg_starts = np.concatenate([[0], boundaries]).astype(int)
+        seg_ends = np.concatenate([boundaries, [n_days]]).astype(int)
+
+        all_values = np.empty(n_days)
+        capital = INITIAL_CAPITAL
+
+        for i in range(len(seg_starts)):
+            s, e = int(seg_starts[i]), int(seg_ends[i])
+            seg_p = price_arr[s:e]               # (days_in_seg, N)
+            p0 = seg_p[0]                        # prices at segment start
+            shares = (capital * w) / p0           # fractional shares
+            daily_total = (seg_p * shares).sum(axis=1)
+            all_values[s:e] = daily_total
+            capital = float(daily_total[-1])
+
+        port_value = pd.Series(all_values, index=dates)
+        port_ret = port_value.pct_change().dropna()
+
     port_ret.name = "Portfolio"
     return port_ret, ind_ret, valid.set_index("Ticker")["Weight"]
 
 
-@st.cache_data(show_spinner="📡 Downloading Fama-French factors …", ttl=86400)
+@st.cache_data(show_spinner="\U0001F4E1 Downloading Fama-French factors \u2026", ttl=86400)
 def download_fama_french() -> pd.DataFrame:
     """
     Download the Fama-French 3-Factor daily dataset directly from
@@ -301,12 +373,12 @@ def download_fama_french() -> pd.DataFrame:
     ff_df["Date"] = pd.to_datetime(ff_df["Date"], format="%Y%m%d")
     ff_df = ff_df.set_index("Date")
     ff_df = ff_df.apply(pd.to_numeric, errors="coerce").dropna()
-    ff_df = ff_df / 100  # percentage — decimal
+    ff_df = ff_df / 100  # percentage ? decimal
 
     return ff_df
 
 
-@st.cache_data(show_spinner="🏢 Looking up sector data …", ttl=7 * 86400, persist="disk", max_entries=256)
+@st.cache_data(show_spinner="\U0001F3E2 Looking up sector data \u2026", ttl=7 * 86400, persist="disk", max_entries=256)
 def get_sector_map(tickers: tuple) -> dict:
     """
     For each ticker, query yf.Ticker(t).info to retrieve sector and industry.
@@ -327,13 +399,13 @@ def get_sector_map(tickers: tuple) -> dict:
     return result
 
 
-# ──────────────────────────────────────────────
-# 5. MAIN — RUN ON BUTTON CLICK
-# ──────────────────────────────────────────────
-st.title("📊 Portfolio Analysis Dashboard")
+# ??????????????????????????????????????????????
+# 5. MAIN ? RUN ON BUTTON CLICK
+# ??????????????????????????????????????????????
+st.title("\U0001F4CA Portfolio Analysis Dashboard")
 
 if not run_btn and "port_ret" not in st.session_state:
-    st.info("👈 Enter your holdings in the sidebar, then click **Analyze Portfolio**.")
+    st.info("\U0001F448 Enter your holdings in the sidebar, then click **Analyze Portfolio**.")
     st.stop()
 
 if run_btn:
@@ -345,8 +417,10 @@ if run_btn:
     st.session_state["holdings"] = holdings
     bench = benchmark_ticker.strip().upper()
 
-    # Gather all tickers we need (portfolio + benchmark + comparison)
+    # Gather all tickers we need (portfolio + benchmark + comparison + ^IRX)
     all_tickers = list(dict.fromkeys(holdings["Ticker"].tolist() + [bench]))
+    if use_dynamic_rf and "^IRX" not in all_tickers:
+        all_tickers.append("^IRX")
 
     comp_holdings = None
     if compare_choice and compare_choice != "None (benchmark only)":
@@ -381,7 +455,7 @@ if run_btn:
         & (all_prices.index <= pd.Timestamp(end_date))
     ].copy()
 
-    missing = [t for t in all_tickers if t not in all_prices.columns]
+    missing = [t for t in all_tickers if t not in all_prices.columns and t != "^IRX"]
     if missing:
         st.warning(f"No data for: **{', '.join(missing)}**. Excluded.")
 
@@ -389,7 +463,26 @@ if run_btn:
         st.error("Yahoo Finance returned no data in the selected date range.")
         st.stop()
 
-    port_ret, ind_ret, wt = compute_weights_and_returns(prices, holdings)
+    # --- Dynamic risk-free rate from 13-week T-Bill (^IRX) ---
+    static_rf_daily = (1 + risk_free_rate) ** (1 / 252) - 1
+    if use_dynamic_rf and "^IRX" in all_prices.columns:
+        irx_full = all_prices["^IRX"].ffill().bfill()
+        irx_series = irx_full.loc[prices.index] if not prices.empty else irx_full
+        dynamic_rf_daily = (1 + (irx_series / 100)) ** (1 / 252) - 1
+        dynamic_rf_daily.name = "RF_daily"
+        rf_float = float(irx_series.iloc[-1] / 100)
+        # Drop ^IRX from both price frames so it doesn't pollute portfolio calcs
+        all_prices = all_prices.drop(columns=["^IRX"])
+        prices = prices.drop(columns=["^IRX"], errors="ignore")
+    else:
+        dynamic_rf_daily = None          # placeholder, sized after port_ret is ready
+        rf_float = risk_free_rate
+        # Drop ^IRX if it was downloaded but checkbox is off
+        if "^IRX" in all_prices.columns:
+            all_prices = all_prices.drop(columns=["^IRX"])
+            prices = prices.drop(columns=["^IRX"], errors="ignore")
+
+    port_ret, ind_ret, wt = compute_weights_and_returns(prices, holdings, rebalance_freq)
 
     if bench not in prices.columns:
         st.error(f"Benchmark **{bench}** has no data.")
@@ -402,7 +495,7 @@ if run_btn:
     comp_wt = None
     comp_name = None
     if comp_holdings is not None:
-        comp_ret, _, comp_wt = compute_weights_and_returns(prices, comp_holdings)
+        comp_ret, _, comp_wt = compute_weights_and_returns(prices, comp_holdings, rebalance_freq)
         comp_ret.name = compare_choice
         comp_name = compare_choice
 
@@ -414,26 +507,32 @@ if run_btn:
     if comp_ret is not None:
         comp_ret = comp_ret.reindex(common).dropna()
 
+    # Finalize the daily risk-free rate Series aligned to portfolio dates
+    if dynamic_rf_daily is not None:
+        rf_series = dynamic_rf_daily.reindex(common).ffill().bfill()
+    else:
+        rf_series = pd.Series(static_rf_daily, index=common, name="RF_daily")
+
     # Stress test data (2007+) reuses the already downloaded full history
     stress_prices = all_prices.loc[
         (all_prices.index >= pd.Timestamp(STRESS_START_DATE))
         & (all_prices.index <= pd.Timestamp(end_date))
     ].copy()
     if not stress_prices.empty:
-        stress_port, _, _ = compute_weights_and_returns(stress_prices, holdings)
+        stress_port, _, _ = compute_weights_and_returns(stress_prices, holdings, rebalance_freq)
         stress_bench = stress_prices[bench].pct_change().dropna() if bench in stress_prices.columns else pd.Series(dtype=float)
     else:
         stress_port = pd.Series(dtype=float)
         stress_bench = pd.Series(dtype=float)
 
-    # Fama-French factors — separate source (Ken French website), no Yahoo
+    # Fama-French factors ? separate source (Ken French website), no Yahoo
     try:
         ff_factors = download_fama_french()
     except Exception as e:
-        st.warning(f"⚠️  Could not download Fama-French factors: {e}")
+        st.warning(f"\u26a0\ufe0f  Could not download Fama-French factors: {e}")
         ff_factors = pd.DataFrame()
 
-    # Sector map — cached, only portfolio tickers (not benchmark)
+    # Sector map ? cached, only portfolio tickers (not benchmark)
     portfolio_tickers = tuple(sorted(holdings["Ticker"].tolist()))
     if fetch_sector_data:
         try:
@@ -447,6 +546,7 @@ if run_btn:
     for k, v in {
         "port_ret": port_ret, "bench_ret": bench_ret, "ind_ret": ind_ret,
         "weights": wt, "bench": bench, "rf": risk_free_rate,
+        "rf_series": rf_series, "rf_float": rf_float,
         "holdings": holdings, "prices": prices,
         "stress_port": stress_port, "stress_bench": stress_bench,
         "comp_ret": comp_ret, "comp_wt": comp_wt, "comp_name": comp_name,
@@ -454,13 +554,15 @@ if run_btn:
     }.items():
         st.session_state[k] = v
 
-# —— Retrieve —————————————————————————
+# ?? Retrieve ??
 port_ret     = st.session_state["port_ret"]
 bench_ret    = st.session_state["bench_ret"]
 ind_ret      = st.session_state["ind_ret"]
 wt           = st.session_state["weights"]
 bench        = st.session_state["bench"]
 rf           = st.session_state["rf"]
+rf_series    = st.session_state.get("rf_series", pd.Series(dtype=float))
+rf_float     = st.session_state.get("rf_float", rf)
 holdings     = st.session_state["holdings"]
 prices       = st.session_state["prices"]
 stress_port  = st.session_state["stress_port"]
@@ -472,9 +574,9 @@ ff_factors   = st.session_state.get("ff_factors", pd.DataFrame())
 sector_map   = st.session_state.get("sector_map", {})
 
 
-# ──────────────────────────────────────────────
+# ??????????????????????????????????????????????
 # 6. HOLDINGS SUMMARY & KEY METRICS
-# ──────────────────────────────────────────────
+# ??????????????????????????????????????????????
 def annualized_return(r): return ((1 + r).prod() ** (252 / max(len(r), 1))) - 1
 def annualized_vol(r):    return r.std() * np.sqrt(252)
 def max_drawdown(r):      c = (1 + r).cumprod(); return ((c - c.cummax()) / c.cummax()).min()
@@ -500,23 +602,23 @@ ann_ret = annualized_return(port_ret)
 b_ann   = annualized_return(bench_ret)
 m1.metric("Ann. Return",     f"{ann_ret:.2%}")
 m2.metric("Ann. Volatility", f"{annualized_vol(port_ret):.2%}")
-m3.metric("Sharpe Ratio",    f"{qs.stats.sharpe(port_ret, rf=rf):.2f}")
+m3.metric("Sharpe Ratio",    f"{qs.stats.sharpe(port_ret, rf=rf_series):.2f}")
 m4.metric("Max Drawdown",    f"{max_drawdown(port_ret):.2%}")
 m5.metric("vs Benchmark",    f"{ann_ret - b_ann:+.2%}")
 
 st.divider()
 
 
-# ──────────────────────────────────────────────
+# ??????????????????????????????????????????????
 # 7. TABS
-# ──────────────────────────────────────────────
+# ??????????????????????????????????????????????
 tab_perf, tab_risk, tab_factor, tab_dd, tab_stress, tab_opt, tab_mc = st.tabs(
-    ["📈 Performance", "⚖️ Risk & Concentration", "🔬 Factor Exposure",
-     "📉 Drawdowns", "🧪 Stress Tests", "🎯 Optimization", "🎲 Monte Carlo"]
+    ["\U0001F4C8 Performance", "\u2696\ufe0f Risk & Concentration", "\U0001F52C Factor Exposure",
+     "\U0001F4C9 Drawdowns", "\U0001F9EA Stress Tests", "\U0001F3AF Optimization", "\U0001F3B2 Monte Carlo"]
 )
 
 
-# ==================== TAB 1 — PERFORMANCE ====================
+# ==================== TAB 1 ? PERFORMANCE ====================
 with tab_perf:
 
     # Growth of $1
@@ -551,7 +653,7 @@ with tab_perf:
     qs_total  = qs.stats.comp(port_ret)
     qs_cagr   = qs.stats.cagr(port_ret)
     qs_vol    = qs.stats.volatility(port_ret)
-    qs_sharpe = qs.stats.sharpe(port_ret, rf=rf)
+    qs_sharpe = qs.stats.sharpe(port_ret, rf=rf_series)
     qs_info   = qs.stats.information_ratio(port_ret, bench_ret)
     b_total   = qs.stats.comp(bench_ret)
     b_cagr    = qs.stats.cagr(bench_ret)
@@ -576,7 +678,7 @@ with tab_perf:
         ("Total Return",    f"{qs.stats.comp(port_ret):.2%}",    f"{qs.stats.comp(bench_ret):.2%}"),
         ("CAGR",            f"{qs.stats.cagr(port_ret):.2%}",    f"{qs.stats.cagr(bench_ret):.2%}"),
         ("Ann. Volatility", f"{qs.stats.volatility(port_ret):.2%}", f"{qs.stats.volatility(bench_ret):.2%}"),
-        ("Sharpe",          f"{qs.stats.sharpe(port_ret, rf=rf):.2f}", f"{qs.stats.sharpe(bench_ret, rf=rf):.2f}"),
+        ("Sharpe",          f"{qs.stats.sharpe(port_ret, rf=rf_series):.2f}", f"{qs.stats.sharpe(bench_ret, rf=rf_series):.2f}"),
         ("Sortino",         f"{qs.stats.sortino(port_ret):.2f}",  f"{qs.stats.sortino(bench_ret):.2f}"),
         ("Calmar",          f"{qs.stats.calmar(port_ret):.2f}",   f"{qs.stats.calmar(bench_ret):.2f}"),
         ("Max Drawdown",    f"{qs.stats.max_drawdown(port_ret):.2%}", f"{qs.stats.max_drawdown(bench_ret):.2%}"),
@@ -599,7 +701,7 @@ with tab_perf:
                 "Total Return": lambda: f"{qs.stats.comp(comp_ret):.2%}",
                 "CAGR": lambda: f"{qs.stats.cagr(comp_ret):.2%}",
                 "Ann. Volatility": lambda: f"{qs.stats.volatility(comp_ret):.2%}",
-                "Sharpe": lambda: f"{qs.stats.sharpe(comp_ret, rf=rf):.2f}",
+                "Sharpe": lambda: f"{qs.stats.sharpe(comp_ret, rf=rf_series):.2f}",
                 "Sortino": lambda: f"{qs.stats.sortino(comp_ret):.2f}",
                 "Calmar": lambda: f"{qs.stats.calmar(comp_ret):.2f}",
                 "Max Drawdown": lambda: f"{qs.stats.max_drawdown(comp_ret):.2%}",
@@ -610,7 +712,7 @@ with tab_perf:
                 "Skew": lambda: f"{qs.stats.skew(comp_ret):.2f}",
                 "Kurtosis": lambda: f"{qs.stats.kurtosis(comp_ret):.2f}",
             }
-            cols[comp_name].append(fn_map.get(metric, lambda: "—")())
+            cols[comp_name].append(fn_map.get(metric, lambda: "?")())
     st.dataframe(pd.DataFrame(cols).set_index("Metric"), width='stretch')
 
     # Monthly heatmap
@@ -628,7 +730,7 @@ with tab_perf:
         colorscale="RdYlGn", zmid=0,
         text=np.vectorize(lambda v: f"{v:.1%}" if not np.isnan(v) else "")(piv.values),
         texttemplate="%{text}",
-        hovertemplate="Year %{y} — %{x}<br>Return: %{z:.2%}<extra></extra>"))
+        hovertemplate="Year %{y} ? %{x}<br>Return: %{z:.2%}<extra></extra>"))
     fig_hm.update_layout(height=max(300, len(piv) * 40),
                          margin=dict(l=40, r=20, t=20, b=40))
     st.plotly_chart(fig_hm, width='stretch')
@@ -656,27 +758,27 @@ with tab_perf:
     st.plotly_chart(fig_dist, width='stretch')
 
 
-# ==================== TAB 2 — RISK & CONCENTRATION ====================
+# ==================== TAB 2 ? RISK & CONCENTRATION ====================
 with tab_risk:
 
     valid_tickers = [t for t in wt.index if t in prices.columns]
     w_arr = wt[valid_tickers].values
 
-    # —— 1. HHI (Herfindahl-Hirschman Index) —————————————————————————
-    st.subheader("Portfolio Concentration — HHI")
+    # ?? 1. HHI (Herfindahl-Hirschman Index) ?????????????
+    st.subheader("Portfolio Concentration ? HHI")
     hhi = float(np.sum(w_arr ** 2))
     hhi_norm = (hhi - 1 / len(w_arr)) / (1 - 1 / len(w_arr)) if len(w_arr) > 1 else 1.0
 
     hh1, hh2 = st.columns([1, 2])
     with hh1:
         if hhi_norm < 0.15:
-            label, color = "Highly Diversified", "🟢"
+            label, color = "Highly Diversified", "\U0001F7E2"
         elif hhi_norm < 0.25:
-            label, color = "Moderately Concentrated", "🟡"
+            label, color = "Moderately Concentrated", "\U0001F7E1"
         elif hhi_norm < 0.50:
-            label, color = "Concentrated", "🟠"
+            label, color = "Concentrated", "\U0001F7E0"
         else:
-            label, color = "Highly Concentrated", "🔴"
+            label, color = "Highly Concentrated", "\U0001F534"
         st.metric("HHI", f"{hhi:.4f}", help="Range: 1/N (equal weight) to 1.0 (single stock)")
         st.metric("Normalized HHI", f"{hhi_norm:.2%}")
         st.markdown(f"**{color} {label}**")
@@ -685,23 +787,23 @@ with tab_risk:
             "The **Herfindahl-Hirschman Index** measures portfolio concentration. "
             "It's the sum of squared weights. A portfolio equally split among *N* "
             "assets has HHI = 1/N (the minimum); a single-stock portfolio has HHI = 1.\n\n"
-            "The **Normalized HHI** rescales this to 0—100%, where 0% = perfectly "
+            "The **Normalized HHI** rescales this to 0?100%, where 0% = perfectly "
             "equal-weighted and 100% = single asset.\n\n"
             "| Norm. HHI | Interpretation |\n"
             "|-----------|----------------|\n"
-            "| < 15%     | 🟢 Highly Diversified |\n"
-            "| 15–25%    | 🟡 Moderately Concentrated |\n"
-            "| 25–50%    | 🟠 Concentrated |\n"
-            "| > 50%     | 🔴 Highly Concentrated |"
+            "| < 15%     | ?? Highly Diversified |\n"
+            "| 15?25%    | ?? Moderately Concentrated |\n"
+            "| 25?50%    | ?? Concentrated |\n"
+            "| > 50%     | ?? Highly Concentrated |"
         )
 
     st.divider()
 
-    # —— 2. Weight allocation + Rolling vol —————————————————————————
+    # ?? 2. Weight allocation + Rolling vol ??????????????
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("Weight Allocation")
-        # Sorted bar chart instead of pie — easier to read with many holdings
+        # Sorted bar chart instead of pie ? easier to read with many holdings
         wt_sorted = wt[valid_tickers].sort_values(ascending=True)
         fig_bar_w = go.Figure(go.Bar(
             x=wt_sorted.values, y=wt_sorted.index, orientation="h",
@@ -736,10 +838,10 @@ with tab_risk:
 
     st.divider()
 
-    # —— 3. Sector Exposure (NEW) —————————————————————————
+    # ?? 3. Sector Exposure (NEW) ????????????????????????
     st.subheader("Sector Exposure")
     if sector_map:
-        # Build a DataFrame: ticker — weight — sector
+        # Build a DataFrame: ticker ? weight ? sector
         sector_df = pd.DataFrame({
             "Ticker": valid_tickers,
             "Weight": wt[valid_tickers].values,
@@ -788,18 +890,18 @@ with tab_risk:
         n_sectors = len(sector_agg)
         if top_sector["Weight"] > 0.5:
             st.warning(
-                f"⚠️ **{top_sector['Sector']}** accounts for **{top_sector['Weight']:.1%}** "
-                f"of your portfolio — over half your exposure is in a single sector. "
+                f"\u26a0\ufe0f **{top_sector['Sector']}** accounts for **{top_sector['Weight']:.1%}** "
+                f"of your portfolio ? over half your exposure is in a single sector. "
                 f"Consider diversifying across more sectors."
             )
         elif n_sectors <= 2:
             st.info(
-                f"📊 Your portfolio spans only **{n_sectors} sector(s)**. "
+                f"\U0001F4CA Your portfolio spans only **{n_sectors} sector(s)**. "
                 "Broader sector exposure can help reduce concentration risk."
             )
         else:
             st.success(
-                f"✅ Your portfolio spans **{n_sectors} sectors**, "
+                f"\u2705 Your portfolio spans **{n_sectors} sectors**, "
                 f"with the largest (**{top_sector['Sector']}**) at **{top_sector['Weight']:.1%}**."
             )
     else:
@@ -807,12 +909,12 @@ with tab_risk:
 
     st.divider()
 
-    # —— 4. Covariance matrix (PyPortfolioOpt) —————————————————————————
+    # ?? 4. Covariance matrix (PyPortfolioOpt) ???????????
     st.subheader("Annualized Covariance Matrix")
 
     asset_prices = prices[valid_tickers]
     if HAS_RISK_MODELS:
-        st.caption("Computed with `pypfopt.risk_models.CovarianceShrinkage` (Ledoit-Wolf) — "
+        st.caption("Computed with `pypfopt.risk_models.CovarianceShrinkage` (Ledoit-Wolf) ? "
                    "a robust estimator that reduces estimation noise.")
         try:
             cov_matrix = risk_models.CovarianceShrinkage(asset_prices).ledoit_wolf()
@@ -848,7 +950,7 @@ with tab_risk:
 
     st.divider()
 
-    # —— 5. Marginal Contribution to Risk (MCR) —————————————————————————
+    # ?? 5. Marginal Contribution to Risk (MCR) ?????????
     st.subheader("Risk Contribution by Asset")
     st.caption(
         "**Marginal Contribution to Risk (MCR)** = how much each extra dollar in "
@@ -871,7 +973,7 @@ with tab_risk:
         "% of Risk": pct_ctr,
     }).sort_values("% of Risk", ascending=True)
 
-    # Bar chart — weight vs risk contribution side by side
+    # Bar chart ? weight vs risk contribution side by side
     fig_mcr = go.Figure()
     fig_mcr.add_trace(go.Bar(
         y=risk_df["Ticker"], x=risk_df["Weight"], name="Weight",
@@ -903,9 +1005,9 @@ with tab_risk:
     # Key insight
     top_risk = risk_df.sort_values("% of Risk", ascending=False).iloc[0]
     st.info(
-        f"💡 **{top_risk['Ticker']}** contributes **{top_risk['% of Risk']:.1%}** "
+        f"\U0001F4A1 **{top_risk['Ticker']}** contributes **{top_risk['% of Risk']:.1%}** "
         f"of total portfolio risk while having a **{top_risk['Weight']:.1%}** weight. "
-        + ("This is disproportionately high — consider reducing exposure."
+        + ("This is disproportionately high ? consider reducing exposure."
            if top_risk["% of Risk"] > top_risk["Weight"] * 1.5
            else "This is roughly proportional to its weight.")
     )
@@ -913,20 +1015,24 @@ with tab_risk:
     st.metric("Portfolio Volatility (annualized, from cov matrix)", f"{port_vol_ann:.2%}")
 
 
-# ==================== TAB 3 — FACTOR EXPOSURE (Fama-French 3-Factor) ====================
+# ==================== TAB 3 ? FACTOR EXPOSURE (Fama-French 3-Factor) ====================
 with tab_factor:
-    # —— Single-factor (CAPM) — always available ————————————————
+    # ?? Single-factor (CAPM) ? always available ????????
     st.subheader("Single-Factor Model (CAPM vs Benchmark)")
 
     from scipy import stats as sp_stats
-    aligned_sf = pd.concat([port_ret, bench_ret], axis=1).dropna()
+    # Compute excess returns by subtracting the dynamic daily risk-free rate
+    rf_aligned_sf = rf_series.reindex(port_ret.index).ffill().bfill()
+    excess_port = port_ret - rf_aligned_sf
+    excess_bench = bench_ret - rf_aligned_sf
+    aligned_sf = pd.concat([excess_port, excess_bench], axis=1).dropna()
     slope_sf, intercept_sf, r_sf, p_sf, se_sf = sp_stats.linregress(
         aligned_sf.iloc[:, 1], aligned_sf.iloc[:, 0])
 
     sf1, sf2, sf3, sf4 = st.columns(4)
     sf1.metric("Beta (vs benchmark)", f"{slope_sf:.3f}")
     sf2.metric("Alpha (daily)", f"{intercept_sf:.4%}")
-    sf3.metric("R²", f"{r_sf**2:.2%}")
+    sf3.metric("R\u00b2", f"{r_sf**2:.2%}")
     sf4.metric("Tracking Error",
                f"{(aligned_sf.iloc[:, 0] - aligned_sf.iloc[:, 1]).std() * np.sqrt(252):.2%}")
 
@@ -935,10 +1041,10 @@ with tab_factor:
         mode="markers", marker=dict(size=3, opacity=0.35, color="#636EFA")))
     xr = np.linspace(aligned_sf.iloc[:, 1].min(), aligned_sf.iloc[:, 1].max(), 100)
     fig_sf.add_trace(go.Scatter(x=xr, y=intercept_sf + slope_sf * xr, mode="lines",
-                                name=f"β = {slope_sf:.3f}",
+                                name=f"\u03b2 = {slope_sf:.3f}",
                                 line=dict(color="red", width=2)))
-    fig_sf.update_layout(xaxis_title=f"Benchmark ({bench}) Daily Return",
-                         yaxis_title="Portfolio Daily Return",
+    fig_sf.update_layout(xaxis_title=f"Benchmark ({bench}) Excess Return",
+                         yaxis_title="Portfolio Excess Return",
                          xaxis_tickformat=".1%", yaxis_tickformat=".1%",
                          height=400, margin=dict(l=50, r=20, t=30, b=40),
                          showlegend=True,
@@ -947,12 +1053,12 @@ with tab_factor:
 
     st.divider()
 
-    # —— Fama-French 3-Factor Model —————————————————————————
+    # ?? Fama-French 3-Factor Model ?????????????????????
     st.subheader("Fama-French 3-Factor Model")
     st.caption(
         "Regresses portfolio excess returns against three systematic risk factors "
         "from Kenneth French's data library: **Mkt-RF** (market risk premium), "
-        "**SMB** (Small Minus Big — size factor), and **HML** (High Minus Low — value factor)."
+        "**SMB** (Small Minus Big ? size factor), and **HML** (High Minus Low ? value factor)."
     )
 
     if not HAS_STATSMODELS:
@@ -968,7 +1074,7 @@ with tab_factor:
         ff_common = port_ret.index.intersection(ff_factors.index)
 
         if len(ff_common) < 30:
-            st.warning(f"Only {len(ff_common)} overlapping dates with FF data — "
+            st.warning(f"Only {len(ff_common)} overlapping dates with FF data ? "
                        "need at least 30 for a meaningful regression.")
         else:
             pr_ff = port_ret.loc[ff_common]
@@ -991,7 +1097,7 @@ with tab_factor:
             smb_beta = params["SMB"]
             hml_beta = params["HML"]
 
-            # —— Metric cards —————————————————————————
+            # ?? Metric cards ??
             st.markdown("##### Factor Loadings")
             ff1, ff2, ff3, ff4 = st.columns(4)
             ff1.metric(
@@ -1016,17 +1122,17 @@ with tab_factor:
             )
 
             ff5, ff6, ff7, ff8 = st.columns(4)
-            ff5.metric("R²", f"{model.rsquared:.2%}")
-            ff6.metric("Adj. R²", f"{model.rsquared_adj:.2%}")
+            ff5.metric("R\u00b2", f"{model.rsquared:.2%}")
+            ff6.metric("Adj. R\u00b2", f"{model.rsquared_adj:.2%}")
             ff7.metric("Observations", f"{int(model.nobs):,}")
             ff8.metric("Residual Vol (ann.)",
                        f"{model.resid.std() * np.sqrt(252):.2%}",
-                       help="Idiosyncratic risk — the volatility not explained by the three factors.")
+                       help="Idiosyncratic risk ? the volatility not explained by the three factors.")
 
             st.divider()
 
-            # —— Factor loadings bar chart —————————————————————————
-            st.markdown("##### Factor Loadings — Visual")
+            # ?? Factor loadings bar chart ??
+            st.markdown("##### Factor Loadings ? Visual")
             betas = pd.DataFrame({
                 "Factor": ["Mkt-RF\n(Market)", "SMB\n(Size)", "HML\n(Value)"],
                 "Beta": [mkt_beta, smb_beta, hml_beta],
@@ -1058,7 +1164,7 @@ with tab_factor:
             ))
             fig_betas.add_vline(x=0, line_dash="dash", line_color="#666", line_width=1)
             fig_betas.update_layout(
-                xaxis_title="Factor Loading (β)",
+                xaxis_title="Factor Loading (\u03b2)",
                 height=280,
                 margin=dict(l=100, r=60, t=20, b=40),
             )
@@ -1066,57 +1172,57 @@ with tab_factor:
 
             st.caption(
                 "**Colored bars** are statistically significant at the 5% level. "
-                "**Gray bars** are not significant — the loading may be due to noise. "
+                "**Gray bars** are not significant ? the loading may be due to noise. "
                 "Error bars show the 95% confidence interval."
             )
 
             st.divider()
 
-            # —— Interpretation helper —————————————————————————
-            st.markdown("##### What Do These Factors Mean—")
+            # ?? Interpretation helper ??
+            st.markdown("##### What Do These Factors Mean?")
             interp_lines = []
             if pvals["Mkt-RF"] < 0.05:
                 if mkt_beta > 1.05:
                     interp_lines.append(
-                        f"🔴 **Mkt-RF = {mkt_beta:.2f}**: Your portfolio is **aggressive** — "
+                        f"\U0001F534 **Mkt-RF = {mkt_beta:.2f}**: Your portfolio is **aggressive** \u2014 "
                         "it amplifies market moves. A 1% market gain gives you ~{:.2f}% gain, "
                         "but losses are amplified too.".format(mkt_beta))
                 elif mkt_beta < 0.95:
                     interp_lines.append(
-                        f"🟢 **Mkt-RF = {mkt_beta:.2f}**: Your portfolio is **defensive** — "
+                        f"\U0001F7E2 **Mkt-RF = {mkt_beta:.2f}**: Your portfolio is **defensive** \u2014 "
                         "it dampens market swings.")
                 else:
                     interp_lines.append(
-                        f"⚪ **Mkt-RF = {mkt_beta:.2f}**: Your portfolio moves roughly in line "
+                        f"\u26aa **Mkt-RF = {mkt_beta:.2f}**: Your portfolio moves roughly in line "
                         "with the market.")
 
             if pvals["SMB"] < 0.05:
                 tilt = "small-cap" if smb_beta > 0 else "large-cap"
                 interp_lines.append(
-                    f"📐 **SMB = {smb_beta:.2f}**: Significant **{tilt} tilt**. "
+                    f"\U0001F4D0 **SMB = {smb_beta:.2f}**: Significant **{tilt} tilt**. "
                     + ("Your returns benefit when smaller companies outperform." if smb_beta > 0
                        else "Your returns benefit when larger companies outperform."))
             else:
                 interp_lines.append(
-                    f"📐 **SMB = {smb_beta:.2f}**: No significant size tilt (p = {pvals['SMB']:.2f}).")
+                    f"\U0001F4D0 **SMB = {smb_beta:.2f}**: No significant size tilt (p = {pvals['SMB']:.2f}).")
 
             if pvals["HML"] < 0.05:
                 tilt = "value" if hml_beta > 0 else "growth"
                 interp_lines.append(
-                    f"📊 **HML = {hml_beta:.2f}**: Significant **{tilt} tilt**. "
+                    f"\U0001F4CA **HML = {hml_beta:.2f}**: Significant **{tilt} tilt**. "
                     + ("Your returns benefit when cheaper (value) stocks outperform." if hml_beta > 0
                        else "Your returns benefit when expensive (growth) stocks outperform."))
             else:
                 interp_lines.append(
-                    f"📊 **HML = {hml_beta:.2f}**: No significant value/growth tilt (p = {pvals['HML']:.2f}).")
+                    f"\U0001F4CA **HML = {hml_beta:.2f}**: No significant value/growth tilt (p = {pvals['HML']:.2f}).")
 
             if pvals["const"] < 0.05 and alpha_annual > 0:
                 interp_lines.append(
-                    f"✨ **Alpha = {alpha_annual:.2%}/yr**: Statistically significant positive alpha! "
+                    f"\u2728 **Alpha = {alpha_annual:.2%}/yr**: Statistically significant positive alpha! "
                     "Your portfolio generates returns not explained by market, size, or value factors.")
             elif pvals["const"] < 0.05 and alpha_annual < 0:
                 interp_lines.append(
-                    f"⚠️ **Alpha = {alpha_annual:.2%}/yr**: Statistically significant negative alpha. "
+                    f"\u26a0\ufe0f **Alpha = {alpha_annual:.2%}/yr**: Statistically significant negative alpha. "
                     "After accounting for factor exposures, the portfolio underperforms.")
 
             for line in interp_lines:
@@ -1124,7 +1230,7 @@ with tab_factor:
 
             st.divider()
 
-            # —— Full regression table —————————————————————————
+            # ?? Full regression table ??
             st.markdown("##### Full Regression Output")
             reg_table = pd.DataFrame({
                 "Coefficient": params.values,
@@ -1238,10 +1344,10 @@ with tab_factor:
 
             attr_display = attr_df.copy()
             attr_display["Beta (Sensitivity)"] = attr_display["Beta (Sensitivity)"].map(
-                lambda v: "—" if pd.isna(v) else f"{v:.3f}"
+                lambda v: "\u2014" if pd.isna(v) else f"{v:.3f}"
             )
             attr_display["Factor Return (Ann.)"] = attr_display["Factor Return (Ann.)"].map(
-                lambda v: "—" if pd.isna(v) else f"{v:+.2%}"
+                lambda v: "\u2014" if pd.isna(v) else f"{v:+.2%}"
             )
             attr_display["Contribution to Portfolio (Ann.)"] = attr_display[
                 "Contribution to Portfolio (Ann.)"
@@ -1256,10 +1362,10 @@ with tab_factor:
             )
 
 
-# ==================== TAB 4 — DRAWDOWNS & TAIL RISK ====================
+# ==================== TAB 4 ? DRAWDOWNS & TAIL RISK ====================
 with tab_dd:
 
-    # —— 1. Key risk metrics row —————————————————————————
+    # ?? 1. Key risk metrics row ?????????????????????????
     st.subheader("Drawdown & Tail-Risk Metrics")
 
     dd_series   = qs.stats.to_drawdown_series(port_ret)
@@ -1282,15 +1388,15 @@ with tab_dd:
                delta_color="inverse",
                help="Largest peak-to-trough decline in portfolio value.")
     dr2.metric("CVaR (95%)", f"{cvar_95:.2%}",
-               help="Expected Shortfall — average loss on the worst 5% of days.")
+               help="Expected Shortfall ? average loss on the worst 5% of days.")
     dr3.metric("VaR (95%)", f"{var_95:.2%}",
-               help="Value at Risk — threshold below which the worst 5% of days fall.")
+               help="Value at Risk ? threshold below which the worst 5% of days fall.")
     dr4.metric("Calmar Ratio", f"{calmar_val:.2f}",
-               help="CAGR — Max Drawdown. Higher = better risk-adjusted returns.")
+               help="CAGR ? Max Drawdown. Higher = better risk-adjusted returns.")
 
     # CVaR plain-English explanation
     st.info(
-        f"📉 **On the worst 5% of trading days, your average loss is "
+        f"\U0001F4C9 **On the worst 5% of trading days, your average loss is "
         f"{abs(cvar_95):.2%}.** This means roughly once a month you can expect "
         f"a daily loss of at least {abs(var_95):.2%}, and when those bad days "
         f"happen, the average hit is {abs(cvar_95):.2%}."
@@ -1298,7 +1404,7 @@ with tab_dd:
 
     st.divider()
 
-    # —— 2. Underwater chart —————————————————————————
+    # ?? 2. Underwater chart ?????????????????????????????
     st.subheader("Underwater Chart")
     st.caption("Shows how far the portfolio is below its all-time high at every point in time.")
 
@@ -1330,7 +1436,7 @@ with tab_dd:
 
     st.divider()
 
-    # —— 3. Worst drawdown periods (quantstats) —————————————————————————
+    # ?? 3. Worst drawdown periods (quantstats) ?????????
     st.subheader("Worst Drawdown Periods")
 
     dd_details = qs.stats.drawdown_details(dd_series)
@@ -1377,7 +1483,7 @@ with tab_dd:
 
     st.divider()
 
-    # —— 4. Tail risk deep dive —————————————————————————
+    # ?? 4. Tail risk deep dive ??????????????????????????
     st.subheader("Tail Risk Analysis")
 
     tc1, tc2, tc3 = st.columns(3)
@@ -1386,44 +1492,44 @@ with tab_dd:
     with tc1:
         st.metric("Skewness", f"{skew_val:.3f}")
         if skew_val < -0.5:
-            st.caption("⚠️ **Negatively skewed** — heavy left tail, "
+            st.caption("\u26a0\ufe0f **Negatively skewed** \u2014 heavy left tail, "
                        "meaning extreme losses are more common than extreme gains.")
         elif skew_val > 0.5:
-            st.caption("✅ **Positively skewed** — the right tail is heavier, "
+            st.caption("\u2705 **Positively skewed** \u2014 the right tail is heavier, "
                        "meaning extreme gains are more frequent than extreme losses.")
         else:
-            st.caption("↔️ **Roughly symmetric** — gains and losses are "
+            st.caption("\u2194\ufe0f **Roughly symmetric** \u2014 gains and losses are "
                        "similarly distributed.")
 
     # Kurtosis
     with tc2:
         st.metric("Excess Kurtosis", f"{kurt_val:.3f}")
         if kurt_val > 1:
-            st.caption("⚠️ **Leptokurtic** (fat tails) — extreme moves in "
+            st.caption("\u26a0\ufe0f **Leptokurtic** (fat tails) \u2014 extreme moves in "
                        "either direction happen more often than a normal "
                        "distribution would predict.")
         elif kurt_val < -1:
-            st.caption("✅ **Platykurtic** (thin tails) — extreme moves "
+            st.caption("\u2705 **Platykurtic** (thin tails) \u2014 extreme moves "
                        "are less common than normal.")
         else:
-            st.caption("↔️ **Near-normal tails** — tail behavior is close "
+            st.caption("\u2194\ufe0f **Near-normal tails** \u2014 tail behavior is close "
                        "to what a Gaussian distribution would predict.")
 
     # Tail ratio
     with tc3:
         st.metric("Tail Ratio", f"{tail_ratio:.2f}",
-                  help="Right tail (gains) — left tail (losses) at the 95th percentile. "
+                  help="Right tail (gains) ? left tail (losses) at the 95th percentile. "
                        "> 1 = fatter right tail (good).")
         if tail_ratio > 1.0:
-            st.caption("✅ **Right tail dominant** — extreme gains tend to "
+            st.caption("\u2705 **Right tail dominant** \u2014 extreme gains tend to "
                        "outsize extreme losses.")
         else:
-            st.caption("⚠️ **Left tail dominant** — extreme losses tend to "
+            st.caption("\u26a0\ufe0f **Left tail dominant** \u2014 extreme losses tend to "
                        "outsize extreme gains.")
 
     st.divider()
 
-    # —— 5. Return distribution analysis ———————————————————
+    # ?? 5. Return distribution analysis ???????????????????????
     st.subheader("Return Distribution Analysis")
     st.caption(
         "Overlayed daily return distributions for your portfolio and benchmark. "
@@ -1460,7 +1566,7 @@ with tab_dd:
 
     st.divider()
 
-    # —— 6. Extended risk statistics table —————————————————————————
+    # ?? 6. Extended risk statistics table ???????????????
     st.subheader("Comprehensive Risk Statistics")
 
     risk_stats = {
@@ -1506,23 +1612,23 @@ with tab_dd:
     st.dataframe(pd.DataFrame(risk_stats).set_index("Metric"), width='stretch')
 
 
-# ==================== TAB 5 — STRESS TESTS ====================
+# ==================== TAB 5 ? STRESS TESTS ====================
 with tab_stress:
     st.subheader("Historical Stress Test Scenarios")
     st.caption("Uses separately downloaded data back to 2007.")
 
     scenarios = {
-        "Global Financial Crisis (Oct 2007 — Mar 2009)": ("2007-10-09", "2009-03-09"),
-        "GFC — Lehman Phase (Sep — Nov 2008)":           ("2008-09-12", "2008-11-20"),
-        "European Debt Crisis (Apr — Oct 2011)":         ("2011-04-29", "2011-10-03"),
-        "China Deval. / Oil Crash (Aug 2015 — Feb 2016)": ("2015-08-10", "2016-02-11"),
-        "Vol-mageddon (Jan — Feb 2018)":                 ("2018-01-26", "2018-02-08"),
-        "Q4 2018 Selloff (Sep — Dec 2018)":              ("2018-09-20", "2018-12-24"),
-        "COVID Crash (Feb — Mar 2020)":                  ("2020-02-19", "2020-03-23"),
-        "2022 Rate Shock (Jan — Oct 2022)":              ("2022-01-03", "2022-10-12"),
-        "2023 Banking Crisis — SVB (Mar 2023)":          ("2023-03-08", "2023-03-15"),
+        "Global Financial Crisis (Oct 2007 ? Mar 2009)": ("2007-10-09", "2009-03-09"),
+        "GFC ? Lehman Phase (Sep ? Nov 2008)":           ("2008-09-12", "2008-11-20"),
+        "European Debt Crisis (Apr ? Oct 2011)":         ("2011-04-29", "2011-10-03"),
+        "China Deval. / Oil Crash (Aug 2015 ? Feb 2016)": ("2015-08-10", "2016-02-11"),
+        "Vol-mageddon (Jan ? Feb 2018)":                 ("2018-01-26", "2018-02-08"),
+        "Q4 2018 Selloff (Sep ? Dec 2018)":              ("2018-09-20", "2018-12-24"),
+        "COVID Crash (Feb ? Mar 2020)":                  ("2020-02-19", "2020-03-23"),
+        "2022 Rate Shock (Jan ? Oct 2022)":              ("2022-01-03", "2022-10-12"),
+        "2023 Banking Crisis ? SVB (Mar 2023)":          ("2023-03-08", "2023-03-15"),
         "Trump Tariffs Shock (Apr 2025)":                ("2025-04-02", "2025-04-08"),
-        "Tariff Escalation (Apr 2 — Apr 21, 2025)":     ("2025-04-02", "2025-04-21"),
+        "Tariff Escalation (Apr 2 ? Apr 21, 2025)":     ("2025-04-02", "2025-04-21"),
     }
 
     sp = stress_port; sb = stress_bench
@@ -1539,16 +1645,17 @@ with tab_stress:
                                 "Benchmark": f"{br:.2%}", "Excess": f"{pr - br:+.2%}"})
                 continue
         results.append({"Scenario": name, "Portfolio": "No data",
-                        "Benchmark": "—", "Excess": "—"})
+                        "Benchmark": "?", "Excess": "?"})
     st.dataframe(pd.DataFrame(results), width='stretch', hide_index=True)
 
     st.subheader("What-If: Uniform Market Shock")
     shock_pct = st.slider("Simulated benchmark drop (%)", -50, 0, -20, step=1)
     estimated_loss = slope_sf * (shock_pct / 100)
-    st.metric(f"Estimated portfolio loss (β = {slope_sf:.2f})", f"{estimated_loss:.2%}")
+    st.metric(f"Estimated portfolio loss (\u03b2 = {slope_sf:.2f})", f"{estimated_loss:.2%}")
 
 
-# ──────────────────────────────────────────────
+# ??????????????????????????????????????????????
+
 # ==================== TAB 6 - OPTIMIZATION ====================
 with tab_opt:
     st.subheader("Optimization: Robust Portfolio Construction")
@@ -1687,7 +1794,7 @@ with tab_opt:
         if EfficientFrontier is not None:
             try:
                 ef = EfficientFrontier(exp_ret, cov_for_opt)
-                ef.max_sharpe(risk_free_rate=rf)
+                ef.max_sharpe(risk_free_rate=rf_float)
                 max_sharpe_w = pd.Series(ef.clean_weights(), dtype=float)
             except Exception:
                 try:
@@ -1722,18 +1829,18 @@ with tab_opt:
             try:
                 bench_mu_ann = float(bench_ret.mean() * 252)
                 bench_var_ann = float(bench_ret.var() * 252)
-                delta = 2.5 if bench_var_ann <= 1e-12 else max((bench_mu_ann - rf) / bench_var_ann, 1e-6)
+                delta = 2.5 if bench_var_ann <= 1e-12 else max((bench_mu_ann - rf_float) / bench_var_ann, 1e-6)
 
                 eq_mcaps = pd.Series(1.0, index=valid_tickers)
                 implied_rets = black_litterman.market_implied_prior_returns(
                     eq_mcaps,
                     delta,
                     cov_for_opt,
-                    risk_free_rate=rf,
+                    risk_free_rate=rf_float,
                 )
 
                 ef_bl = EfficientFrontier(implied_rets, cov_for_opt)
-                ef_bl.max_sharpe(risk_free_rate=rf)
+                ef_bl.max_sharpe(risk_free_rate=rf_float)
                 bl_w = pd.Series(ef_bl.clean_weights(), dtype=float)
             except Exception:
                 bl_w = max_sharpe_w.copy()
@@ -1959,7 +2066,8 @@ with tab_mc:
 st.divider()
 st.caption(
     "Data from Yahoo Finance via `yfinance`. Past performance is not indicative "
-    "of future results. For educational/analytical purposes only — not financial advice."
+    "of future results. For educational/analytical purposes only ? not financial advice. Built solely on vibes, for the vibes."
 )
+
 
 
