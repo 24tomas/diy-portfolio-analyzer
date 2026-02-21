@@ -273,6 +273,8 @@ if "saved_portfolios" not in st.session_state:
     st.session_state["saved_portfolios"] = load_saved_portfolios()
 if "analysis_ready" not in st.session_state:
     st.session_state["analysis_ready"] = False
+if "input_mode" not in st.session_state:
+    st.session_state["input_mode"] = "Shares"
 
 
 # ??????????????????????????????????????????????
@@ -317,7 +319,14 @@ with st.sidebar:
 
     # ?? 3b. Holdings editor ???????????????????????????
     st.header("\U0001F4C1 Portfolio Holdings")
-    st.caption("Enter tickers and how many shares you own.")
+    st.caption("Enter positions using shares or target portfolio weights.")
+
+    input_mode = st.radio(
+        "Input Mode",
+        options=["Shares", "Target Weights (%)"],
+        horizontal=True,
+        key="input_mode",
+    )
 
     if "holdings" not in st.session_state:
         st.session_state["holdings"] = pd.DataFrame(
@@ -337,6 +346,16 @@ with st.sidebar:
         shares_val = pd.to_numeric(row.get("Shares", np.nan), errors="coerce")
         holdings_share_map[ticker] = float(shares_val) if pd.notna(shares_val) else 10.0
 
+    holdings_weight_map = {}
+    share_sum = float(sum(max(v, 0.0) for v in holdings_share_map.values()))
+    if share_sum > 0:
+        for t, v in holdings_share_map.items():
+            holdings_weight_map[t] = 100.0 * max(v, 0.0) / share_sum
+    elif holdings_share_map:
+        eq_w = 100.0 / len(holdings_share_map)
+        for t in holdings_share_map:
+            holdings_weight_map[t] = eq_w
+
     unique_tickers = list(holdings_share_map.keys())
     if "optim_shares" not in st.session_state:
         st.session_state["optim_shares"] = holdings_share_map.copy()
@@ -349,6 +368,17 @@ with st.sidebar:
                 synced_shares[ticker] = float(holdings_share_map.get(ticker, 10.0))
         st.session_state["optim_shares"] = synced_shares
 
+    if "optim_weights" not in st.session_state:
+        st.session_state["optim_weights"] = holdings_weight_map.copy()
+    else:
+        synced_weights = {}
+        for ticker in unique_tickers:
+            if ticker in st.session_state["optim_weights"]:
+                synced_weights[ticker] = float(st.session_state["optim_weights"][ticker])
+            else:
+                synced_weights[ticker] = float(holdings_weight_map.get(ticker, 0.0))
+        st.session_state["optim_weights"] = synced_weights
+
     new_ticker = st.text_input("Add Ticker", key="new_ticker_input").strip().upper()
     if st.button("\u2795 Add", width='stretch'):
         if not new_ticker:
@@ -357,6 +387,7 @@ with st.sidebar:
             st.info(f"{new_ticker} is already in your portfolio.")
         else:
             st.session_state["optim_shares"][new_ticker] = 10.0
+            st.session_state["optim_weights"][new_ticker] = 0.0
             st.session_state["holdings"] = pd.concat(
                 [
                     holdings_df[["Ticker", "Shares"]] if not holdings_df.empty else pd.DataFrame(columns=["Ticker", "Shares"]),
@@ -369,31 +400,40 @@ with st.sidebar:
             st.success(f"Added {new_ticker} with 10 shares.")
             st.rerun()
 
-    if not st.session_state["optim_shares"]:
+    active_key = "optim_shares" if input_mode == "Shares" else "optim_weights"
+    if not st.session_state[active_key]:
         st.info("No tickers yet. Add one above to start building your portfolio.")
     else:
-        def _sync_from_num(ticker_name: str):
-            num_key = f"num_{ticker_name}"
-            slide_key = f"slide_{ticker_name}"
+        def _sync_from_num(ticker_name: str, mode_key: str):
+            prefix = "shr" if mode_key == "optim_shares" else "wt"
+            num_key = f"num_{prefix}_{ticker_name}"
+            slide_key = f"slide_{prefix}_{ticker_name}"
             v = float(st.session_state.get(num_key, 0.0))
-            v = max(0.0, v)
-            st.session_state["optim_shares"][ticker_name] = v
+            upper = 100.0 if mode_key == "optim_weights" else v
+            v = min(max(0.0, v), upper)
+            st.session_state[mode_key][ticker_name] = v
             st.session_state[slide_key] = v
 
-        def _sync_from_slide(ticker_name: str):
-            num_key = f"num_{ticker_name}"
-            slide_key = f"slide_{ticker_name}"
+        def _sync_from_slide(ticker_name: str, mode_key: str):
+            prefix = "shr" if mode_key == "optim_shares" else "wt"
+            num_key = f"num_{prefix}_{ticker_name}"
+            slide_key = f"slide_{prefix}_{ticker_name}"
             v = float(st.session_state.get(slide_key, 0.0))
-            v = max(0.0, v)
-            st.session_state["optim_shares"][ticker_name] = v
+            upper = 100.0 if mode_key == "optim_weights" else v
+            v = min(max(0.0, v), upper)
+            st.session_state[mode_key][ticker_name] = v
             st.session_state[num_key] = v
 
-        for ticker in list(st.session_state["optim_shares"].keys()):
+        for ticker in list(st.session_state[active_key].keys()):
             with st.container():
-                num_key = f"num_{ticker}"
-                slide_key = f"slide_{ticker}"
-                base_val = float(st.session_state["optim_shares"].get(ticker, 10.0))
+                prefix = "shr" if active_key == "optim_shares" else "wt"
+                num_key = f"num_{prefix}_{ticker}"
+                slide_key = f"slide_{prefix}_{ticker}"
+                default_val = 10.0 if active_key == "optim_shares" else 0.0
+                base_val = float(st.session_state[active_key].get(ticker, default_val))
                 base_val = max(0.0, base_val)
+                if active_key == "optim_weights":
+                    base_val = min(base_val, 100.0)
 
                 if num_key not in st.session_state:
                     st.session_state[num_key] = base_val
@@ -405,7 +445,7 @@ with st.sidebar:
                     float(st.session_state.get(num_key, base_val)),
                     float(st.session_state.get(slide_key, base_val)),
                 )
-                slider_max = max(1000.0, sync_anchor * 2.0)
+                slider_max = 100.0 if active_key == "optim_weights" else max(1000.0, sync_anchor * 2.0)
 
                 c1, c2, c3 = st.columns([1.5, 2, 0.5])
                 c1.number_input(
@@ -415,7 +455,7 @@ with st.sidebar:
                     format="%.2f",
                     key=num_key,
                     on_change=_sync_from_num,
-                    args=(ticker,),
+                    args=(ticker, active_key),
                 )
                 c2.slider(
                     "Adjust",
@@ -424,15 +464,32 @@ with st.sidebar:
                     step=1.0,
                     key=slide_key,
                     on_change=_sync_from_slide,
-                    args=(ticker,),
+                    args=(ticker, active_key),
                     label_visibility="collapsed",
                 )
                 if c3.button("\u2715", key=f"del_{ticker}", help=f"Remove {ticker}"):
                     st.session_state["optim_shares"].pop(ticker, None)
+                    st.session_state["optim_weights"].pop(ticker, None)
                     st.session_state.pop(num_key, None)
                     st.session_state.pop(slide_key, None)
                     st.session_state["analysis_ready"] = False
                     st.rerun()
+
+    if input_mode == "Target Weights (%)" and st.session_state["optim_weights"]:
+        total_weight = float(sum(st.session_state["optim_weights"].values()))
+        if not np.isclose(total_weight, 100.0, atol=1e-6):
+            st.warning(
+                f"Target weights currently sum to {total_weight:.2f}%. "
+                "They will be automatically normalized to 100% during analysis."
+            )
+            if st.button("Normalize to 100%", width='stretch'):
+                if total_weight > 0:
+                    st.session_state["optim_weights"] = {
+                        t: (v / total_weight) * 100.0
+                        for t, v in st.session_state["optim_weights"].items()
+                    }
+                st.rerun()
+
     edited_holdings = pd.DataFrame(
         {
             "Ticker": list(st.session_state["optim_shares"].keys()),
@@ -465,18 +522,7 @@ with st.sidebar:
 
     st.divider()
 
-    # ?? 3d. Date range, benchmark, rf ?????????????????
-    col1, col2 = st.columns(2)
-    with col1:
-        start_date = st.date_input("Start Date",
-                                   value=date.today() - timedelta(days=3*365),
-                                   min_value=date(1970, 1, 1),
-                                   max_value=date.today())
-    with col2:
-        end_date = st.date_input("End Date", 
-                                 value=date.today(),
-                                 min_value=date(1970, 1, 1),
-                                 max_value=date.today())
+    # ?? 3d. Benchmark, rf ?????????????????
 
     benchmark_ticker = st.text_input("Benchmark", value="SPY",
                                      help="Used for comparison in charts and factor analysis")
@@ -577,17 +623,24 @@ def download_prices(tickers: tuple, start, end, max_retries=5):
 
 
 def compute_weights_and_returns(
-    prices, holdings, rebalance_freq="Daily (Constant Weights)", shares_dict=None
+    prices,
+    holdings,
+    rebalance_freq="Daily (Constant Weights)",
+    shares_dict=None,
+    input_mode="Shares",
+    weights_dict=None,
 ):
     """Compute portfolio returns via a proper backtest simulation.
 
-    Target weights are derived from the user's current shares and the latest
-    available price.  Historical returns are then simulated by investing
+    Target weights are derived from either explicit share counts or user-defined
+    target weights. Historical returns are then simulated by investing
     hypothetical capital ($10,000) according to the chosen rebalancing
     strategy, eliminating look-ahead bias from constant-weight assumptions.
     """
     if shares_dict is None:
         shares_dict = dict(zip(holdings["Ticker"], holdings["Shares"]))
+    if weights_dict is None:
+        weights_dict = {}
 
     INITIAL_CAPITAL = 10_000.0
 
@@ -596,15 +649,32 @@ def compute_weights_and_returns(
         st.error("\u274c  None of the tickers have price data.")
         st.stop()
 
-    # Target weights from latest prices and shares
+    tickers = valid["Ticker"].tolist()
     latest = prices.iloc[-1]
     valid["Price"] = valid["Ticker"].map(latest)
-    valid["Shares_Count"] = valid["Ticker"].map(lambda t: shares_dict.get(t, 0.0))
-    valid["Value"] = valid["Shares_Count"] * valid["Price"]
-    total = valid["Value"].sum()
-    valid["Weight"] = valid["Value"] / total
-    tickers = valid["Ticker"].tolist()
-    w = valid["Weight"].values
+
+    if input_mode == "Target Weights (%)":
+        raw_weights = np.array([float(weights_dict.get(t, 0.0)) for t in tickers], dtype=float)
+        raw_weights = np.nan_to_num(raw_weights, nan=0.0, posinf=0.0, neginf=0.0)
+        raw_weights = np.clip(raw_weights, 0.0, None)
+        total_weight = float(raw_weights.sum())
+        if total_weight <= 0:
+            st.error("\u274c  Target weights must sum to a positive value.")
+            st.stop()
+        w = raw_weights / total_weight
+        valid["Shares_Count"] = np.nan
+        valid["Value"] = w
+        valid["Weight"] = w
+    else:
+        # Target weights from latest prices and shares
+        valid["Shares_Count"] = valid["Ticker"].map(lambda t: float(shares_dict.get(t, 0.0)))
+        valid["Value"] = valid["Shares_Count"] * valid["Price"]
+        total = float(valid["Value"].sum())
+        if total <= 0:
+            st.error("\u274c  Share counts must produce a positive portfolio value.")
+            st.stop()
+        valid["Weight"] = valid["Value"] / total
+        w = valid["Weight"].values
 
     ind_ret = prices[tickers].pct_change().dropna()
 
@@ -613,10 +683,15 @@ def compute_weights_and_returns(
         port_ret = ind_ret.dot(w)
 
     elif rebalance_freq == "Buy & Hold":
-        # Hold explicit share counts and track their historical value
         asset_prices = prices[tickers]
-        current_shares = np.array([shares_dict.get(t, 0.0) for t in tickers])
-        port_value = (asset_prices * current_shares).sum(axis=1)
+        if input_mode == "Target Weights (%)":
+            # Buy-and-hold on target weights uses one-time capital allocation.
+            initial_prices = asset_prices.iloc[0].values
+            bh_shares = (INITIAL_CAPITAL * w) / initial_prices
+        else:
+            # Buy-and-hold on shares mode tracks explicit share counts.
+            bh_shares = np.array([float(shares_dict.get(t, 0.0)) for t in tickers], dtype=float)
+        port_value = asset_prices.multiply(bh_shares, axis=1).sum(axis=1)
         port_ret = port_value.pct_change().dropna()
 
     else:
@@ -716,6 +791,85 @@ def get_sector_map(tickers: tuple) -> dict:
     return result
 
 
+def build_html_report(
+    portfolio_returns: pd.Series,
+    benchmark_returns: pd.Series,
+    rf_daily: pd.Series,
+    weights: pd.Series,
+    sector_map: dict,
+    benchmark_name: str,
+    input_mode: str,
+    window_start: date,
+    window_end: date,
+) -> str:
+    """Build a lightweight HTML tear sheet for download."""
+    ann_return = ((1 + portfolio_returns).prod() ** (252 / max(len(portfolio_returns), 1))) - 1
+    ann_vol = portfolio_returns.std() * np.sqrt(252)
+    aligned_rf = rf_daily.reindex(portfolio_returns.index).ffill().bfill()
+    excess = portfolio_returns - aligned_rf
+    sharpe = 0.0 if len(excess) < 2 or np.isclose(excess.std(), 0.0) else float(excess.mean() / excess.std() * np.sqrt(252))
+    comp = (1 + portfolio_returns).cumprod()
+    max_dd = float(((comp - comp.cummax()) / comp.cummax()).min())
+    bench_total = (1 + benchmark_returns).prod() - 1
+    port_total = (1 + portfolio_returns).prod() - 1
+
+    metrics_df = pd.DataFrame(
+        [
+            ("Total Return", f"{port_total:.2%}"),
+            ("Total Return vs Benchmark", f"{port_total - bench_total:+.2%}"),
+            ("Annualized Return", f"{ann_return:.2%}"),
+            ("Annualized Volatility", f"{ann_vol:.2%}"),
+            ("Sharpe Ratio (Ann.)", f"{sharpe:.2f}"),
+            ("Max Drawdown", f"{max_dd:.2%}"),
+            ("Benchmark", benchmark_name),
+            ("Input Mode", input_mode),
+            ("Analysis Window", f"{window_start.isoformat()} to {window_end.isoformat()}"),
+        ],
+        columns=["Metric", "Value"],
+    )
+
+    sector_df = pd.DataFrame(
+        {
+            "Ticker": weights.index.tolist(),
+            "Weight": weights.values,
+            "Sector": [sector_map.get(t, {}).get("sector", "Unknown") for t in weights.index],
+        }
+    )
+    sector_df = sector_df.groupby("Sector", as_index=False)["Weight"].sum().sort_values("Weight", ascending=False)
+    sector_df["Weight"] = sector_df["Weight"].map(lambda v: f"{v:.2%}")
+
+    metrics_html = metrics_df.to_html(index=False, border=0, classes="table")
+    sectors_html = sector_df.to_html(index=False, border=0, classes="table")
+    generated_at = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+    return f"""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Portfolio Tear Sheet</title>
+  <style>
+    body {{ font-family: Inter, Arial, sans-serif; margin: 28px; color: #111827; background: #ffffff; }}
+    h1 {{ margin: 0 0 6px 0; font-size: 26px; }}
+    .meta {{ color: #4b5563; margin-bottom: 18px; font-size: 13px; }}
+    h2 {{ margin: 24px 0 10px 0; font-size: 18px; }}
+    .table {{ border-collapse: collapse; width: 100%; max-width: 920px; }}
+    .table th, .table td {{ border: 1px solid #d1d5db; padding: 8px 10px; text-align: left; font-size: 13px; }}
+    .table th {{ background: #f3f4f6; font-weight: 600; }}
+  </style>
+</head>
+<body>
+  <h1>Portfolio Analysis Tear Sheet</h1>
+  <div class="meta">Generated: {generated_at}</div>
+  <h2>Key Metrics</h2>
+  {metrics_html}
+  <h2>Sector Exposure</h2>
+  {sectors_html}
+</body>
+</html>
+"""
+
+
 # ??????????????????????????????????????????????
 # 5. MAIN ? RUN ON BUTTON CLICK
 # ??????????????????????????????????????????????
@@ -739,10 +893,6 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 if fetch_btn:
-    if end_date <= start_date:
-        st.error("End Date must be after Start Date.")
-        st.stop()
-
     holdings = validate_holdings(edited_holdings)
     st.session_state["holdings"] = holdings
     bench = benchmark_ticker.strip().upper()
@@ -765,11 +915,16 @@ if fetch_btn:
                     all_tickers.append(t)
 
     all_tickers = tuple(sorted(all_tickers))
-    full_start = min(start_date, STRESS_START_DATE)
+    fetch_end = date.today()
+    fetch_start = fetch_end - timedelta(days=15 * 365)
 
     with st.spinner("Downloading data from Yahoo Finance..."):
         try:
-            all_prices, first_valid_dates = download_prices(all_tickers, full_start, end_date)
+            all_prices, first_valid_dates = download_prices(
+                all_tickers,
+                fetch_start,
+                fetch_end + timedelta(days=1),
+            )
         except Exception as e:
             st.error(
                 "Yahoo Finance download failed. This is usually a temporary "
@@ -782,11 +937,6 @@ if fetch_btn:
             st.caption(f"Details: {e}")
             st.stop()
 
-    prices = all_prices.loc[
-        (all_prices.index >= pd.Timestamp(start_date))
-        & (all_prices.index <= pd.Timestamp(end_date))
-    ].copy()
-
     missing_tickers = [t for t in all_tickers if t not in all_prices.columns and t != "^IRX"]
     if missing_tickers:
         st.warning(
@@ -794,36 +944,16 @@ if fetch_btn:
             "They have been excluded from the analysis. Please check the tickers or your date range."
         )
 
-    if prices.empty:
+    if all_prices.empty:
         st.error(
             "\u274c No valid price data found for any of the provided tickers. "
             "Please check your spelling or try a different date range."
         )
         st.stop()
 
-    if bench not in prices.columns:
-        st.error(f"Benchmark **{bench}** has no data in the fetched range.")
+    if bench not in all_prices.columns:
+        st.error(f"Benchmark **{bench}** has no data in the fetched dataset.")
         st.stop()
-
-    late_start_assets = []
-    late_start_threshold = pd.Timestamp(start_date) + pd.Timedelta(days=30)
-    for t in holdings["Ticker"].tolist():
-        first_dt = first_valid_dates.get(t)
-        if first_dt is None:
-            continue
-        try:
-            first_ts = pd.Timestamp(first_dt)
-        except Exception:
-            continue
-        if pd.notna(first_ts) and first_ts > late_start_threshold:
-            late_start_assets.append(f"{t} ({first_ts.strftime('%Y-%m-%d')})")
-
-    if late_start_assets:
-        st.warning(
-            "Note: The following assets did not trade for the entire backtest period. "
-            "Their earliest available price was assumed constant (0% return) prior to their inception: "
-            + ", ".join(late_start_assets)
-        )
 
     # Fama-French factors - separate source (Ken French website), no Yahoo
     try:
@@ -851,6 +981,14 @@ if fetch_btn:
     st.session_state["fetched_portfolio_tickers"] = tuple(sorted(holdings["Ticker"].tolist()))
     st.session_state["ff_factors"] = ff_factors
     st.session_state["sector_map"] = sector_map
+    st.session_state["fetch_window_start"] = fetch_start
+    st.session_state["fetch_window_end"] = fetch_end
+
+    available_start = all_prices.index.min().date()
+    available_end = all_prices.index.max().date()
+    default_start = max(available_start, available_end - timedelta(days=3 * 365))
+    st.session_state["analysis_start_date"] = default_start
+    st.session_state["analysis_end_date"] = available_end
 
 if not st.session_state.get("analysis_ready", False):
     st.info("\U0001F448 Please define your portfolio and click **Fetch Market Data** to begin.")
@@ -876,16 +1014,46 @@ comp_holdings = st.session_state.get("fetched_comp_holdings")
 comp_name = st.session_state.get("fetched_comp_name")
 first_valid_dates = st.session_state.get("fetched_first_valid_dates", {})
 
+data_min = all_prices.index.min().date()
+data_max = all_prices.index.max().date()
+default_start = max(data_min, data_max - timedelta(days=3 * 365))
+if "analysis_start_date" not in st.session_state:
+    st.session_state["analysis_start_date"] = default_start
+if "analysis_end_date" not in st.session_state:
+    st.session_state["analysis_end_date"] = data_max
+if st.session_state["analysis_start_date"] < data_min or st.session_state["analysis_start_date"] > data_max:
+    st.session_state["analysis_start_date"] = default_start
+if st.session_state["analysis_end_date"] < data_min or st.session_state["analysis_end_date"] > data_max:
+    st.session_state["analysis_end_date"] = data_max
+
+st.markdown("#### Analysis Date Window")
+d1, d2 = st.columns(2)
+analysis_start = d1.date_input(
+    "Analysis Start Date",
+    min_value=data_min,
+    max_value=data_max,
+    key="analysis_start_date",
+)
+analysis_end = d2.date_input(
+    "Analysis End Date",
+    min_value=data_min,
+    max_value=data_max,
+    key="analysis_end_date",
+)
+if analysis_end <= analysis_start:
+    st.error("Analysis End Date must be after Analysis Start Date.")
+    st.stop()
+
 prices = all_prices.loc[
-    (all_prices.index >= pd.Timestamp(start_date))
-    & (all_prices.index <= pd.Timestamp(end_date))
+    (all_prices.index >= pd.Timestamp(analysis_start))
+    & (all_prices.index <= pd.Timestamp(analysis_end))
 ].copy()
 if prices.empty:
     st.error("No data available in this date range from the cached dataset. Click **Fetch Market Data**.")
     st.stop()
 
 late_start_assets = []
-late_start_threshold = pd.Timestamp(start_date) + pd.Timedelta(days=30)
+late_start_threshold = pd.Timestamp(analysis_start) + pd.Timedelta(days=30)
 for t in holdings["Ticker"].tolist():
     first_dt = first_valid_dates.get(t)
     if first_dt is None:
@@ -924,9 +1092,16 @@ if bench not in prices.columns:
     st.error(f"Benchmark **{bench}** has no data.")
     st.stop()
 
+input_mode = st.session_state.get("input_mode", "Shares")
 optim_shares = st.session_state.get("optim_shares", {})
+optim_weights = st.session_state.get("optim_weights", {})
 port_ret, ind_ret, wt = compute_weights_and_returns(
-    prices, holdings, rebalance_freq, shares_dict=optim_shares
+    prices,
+    holdings,
+    rebalance_freq,
+    shares_dict=optim_shares,
+    input_mode=input_mode,
+    weights_dict=optim_weights,
 )
 bench_ret = prices[bench].pct_change().dropna()
 bench_ret.name = "Benchmark"
@@ -936,7 +1111,12 @@ comp_ret = None
 comp_wt = None
 if comp_holdings is not None:
     comp_ret, _, comp_wt = compute_weights_and_returns(
-        prices, comp_holdings, rebalance_freq, shares_dict=None
+        prices,
+        comp_holdings,
+        rebalance_freq,
+        shares_dict=None,
+        input_mode="Shares",
+        weights_dict=None,
     )
     comp_ret.name = comp_name
 
@@ -957,11 +1137,16 @@ else:
 # Stress test data (2007+) reuses the already downloaded full history
 stress_prices = all_prices_no_irx.loc[
     (all_prices_no_irx.index >= pd.Timestamp(STRESS_START_DATE))
-    & (all_prices_no_irx.index <= pd.Timestamp(end_date))
+    & (all_prices_no_irx.index <= pd.Timestamp(analysis_end))
 ].copy()
 if not stress_prices.empty:
     stress_port, _, _ = compute_weights_and_returns(
-        stress_prices, holdings, rebalance_freq, shares_dict=optim_shares
+        stress_prices,
+        holdings,
+        rebalance_freq,
+        shares_dict=optim_shares,
+        input_mode=input_mode,
+        weights_dict=optim_weights,
     )
     stress_bench = (
         stress_prices[bench].pct_change().dropna()
@@ -984,6 +1169,8 @@ for k, v in {
     "stress_port": stress_port, "stress_bench": stress_bench,
     "comp_ret": comp_ret, "comp_wt": comp_wt, "comp_name": comp_name,
     "ff_factors": ff_factors, "sector_map": sector_map,
+    "analysis_start": analysis_start, "analysis_end": analysis_end,
+    "input_mode": input_mode,
 }.items():
     st.session_state[k] = v
 
@@ -1005,6 +1192,9 @@ comp_wt      = st.session_state.get("comp_wt")
 comp_name    = st.session_state.get("comp_name")
 ff_factors   = st.session_state.get("ff_factors", pd.DataFrame())
 sector_map   = st.session_state.get("sector_map", {})
+analysis_start = st.session_state.get("analysis_start", data_min)
+analysis_end = st.session_state.get("analysis_end", data_max)
+input_mode = st.session_state.get("input_mode", "Shares")
 
 
 # ??????????????????????????????????????????????
@@ -1063,9 +1253,16 @@ st.subheader("Your Holdings")
 disp = holdings.copy()
 latest = prices.iloc[-1]
 disp["Price"] = disp["Ticker"].map(latest)
-disp["Value"] = disp["Shares"] * disp["Price"]
-total_val = disp["Value"].sum()
-disp["Weight"] = disp["Value"] / total_val
+if input_mode == "Target Weights (%)":
+    wt_map = wt.to_dict()
+    disp["Weight"] = disp["Ticker"].map(lambda t: float(wt_map.get(t, 0.0)))
+    disp["Target Weight (%)"] = disp["Weight"] * 100.0
+    # Show a notional dollar split to keep the table readable in weight mode.
+    disp["Value"] = disp["Weight"] * 10_000.0
+else:
+    disp["Value"] = disp["Shares"] * disp["Price"]
+    total_val = disp["Value"].sum()
+    disp["Weight"] = disp["Value"] / total_val
 # Add sector column if available
 if sector_map:
     disp["Sector"] = disp["Ticker"].map(lambda t: sector_map.get(t, {}).get("sector", "Unknown"))
@@ -1073,6 +1270,8 @@ disp_fmt = disp.copy()
 disp_fmt["Price"]  = disp["Price"].map("${:,.2f}".format)
 disp_fmt["Value"]  = disp["Value"].map("${:,.2f}".format)
 disp_fmt["Weight"] = disp["Weight"].map("{:.1%}".format)
+if "Target Weight (%)" in disp_fmt.columns:
+    disp_fmt["Target Weight (%)"] = disp["Target Weight (%)"].map("{:.2f}%".format)
 st.dataframe(disp_fmt, width='stretch', hide_index=True)
 
 m1, m2, m3, m4, m5 = st.columns(5)
@@ -1083,6 +1282,27 @@ m2.metric("Ann. Volatility", f"{annualized_vol(port_ret):.2%}")
 m3.metric("Sharpe Ratio",    f"{dynamic_sharpe(port_ret, rf_series):.2f}")
 m4.metric("Max Drawdown",    f"{max_drawdown(port_ret):.2%}")
 m5.metric("vs Benchmark",    f"{ann_ret - b_ann:+.2%}")
+
+report_html = build_html_report(
+    portfolio_returns=port_ret,
+    benchmark_returns=bench_ret,
+    rf_daily=rf_series,
+    weights=wt,
+    sector_map=sector_map,
+    benchmark_name=bench,
+    input_mode=input_mode,
+    window_start=analysis_start,
+    window_end=analysis_end,
+)
+with st.sidebar:
+    st.divider()
+    st.download_button(
+        "📄 Download Report",
+        data=report_html,
+        file_name=f"portfolio_tearsheet_{analysis_end.isoformat()}.html",
+        mime="text/html",
+        use_container_width=True,
+    )
 
 st.divider()
 
