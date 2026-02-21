@@ -1145,6 +1145,40 @@ with tab_factor:
     st.plotly_chart(fig_sf, width='stretch')
 
     st.divider()
+    roll_cov = excess_port.rolling(252).cov(excess_bench)
+    roll_var = excess_bench.rolling(252).var()
+    roll_beta = roll_cov / roll_var
+
+    st.subheader("Rolling 1-Year Beta (Style Drift)")
+    fig_beta = go.Figure()
+    fig_beta.add_trace(go.Scatter(
+        x=roll_beta.index,
+        y=roll_beta.values,
+        name="Rolling Beta",
+        line=dict(color="#FFA15A", width=2),
+    ))
+    fig_beta.add_hline(
+        y=1.0,
+        line_dash="dash",
+        line_color="#888",
+        annotation_text="Market Beta (1.0)",
+    )
+    fig_beta.add_hline(
+        y=0.0,
+        line_dash="dash",
+        line_color="#888",
+        annotation_text="Market Neutral (0.0)",
+    )
+    fig_beta.update_layout(
+        xaxis_title="Date",
+        yaxis_title="Beta",
+        height=350,
+        margin=dict(l=50, r=20, t=30, b=40),
+    )
+    st.plotly_chart(fig_beta, width='stretch')
+    st.caption("Shows how the portfolio's market sensitivity has evolved over time. A rising Beta indicates the portfolio is becoming more aggressive/correlated with the market, while a falling Beta suggests it is becoming more defensive or uncorrelated.")
+
+    st.divider()
     # ?? Fama-French 5-Factor Model ?????????????????????
     st.subheader("Fama-French 5-Factor Model")
     st.caption(
