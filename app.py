@@ -1361,20 +1361,25 @@ macro_df = pd.DataFrame(index=common, columns=["Inflation_YoY", "FEDFUNDS"], dty
 if len(common) > 0:
     try:
         macro_raw = fetch_macro_data(common.min().date(), common.max().date())
-        # Strip timezone from the yfinance index for safe merging with FRED naive dates
-        common_naive = common.tz_localize(None) if common.tz is not None else common
-
-        # Reindex using the naive dates, then assign the aligned values to our tz-aware DataFrame
-        aligned_raw = macro_raw.reindex(common_naive).ffill()
-        macro_df = pd.DataFrame(index=common)
-        macro_df["Inflation_YoY"] = aligned_raw["Inflation_YoY"].values
-        macro_df["FEDFUNDS"] = aligned_raw["FEDFUNDS"].values
+        
+        # Bulletproof date alignment: match on exact Python date objects 
+        # to ignore any hidden time-of-day or timezone differences.
+        temp_common = pd.DataFrame({"pure_date": common.date}, index=common)
+        
+        temp_macro = macro_raw.copy()
+        temp_macro["pure_date"] = temp_macro.index.date
+        
+        # Merge left to keep exactly the 'common' dates, then forward-fill any missing weekends
+        merged = temp_common.merge(temp_macro, on="pure_date", how="left").set_index(common)
+        
+        # Backfill first, then forward fill to ensure no NaNs at the very start of the series
+        merged = merged.bfill().ffill() 
+        
+        macro_df["Inflation_YoY"] = merged["Inflation_YoY"]
+        macro_df["FEDFUNDS"] = merged["FEDFUNDS"]
+        
     except Exception as e:
-        st.warning(f"\u26a0\ufe0f Could not fetch macro data from FRED: {e}")
-        macro_df = pd.DataFrame(
-            {"Inflation_YoY": np.nan, "FEDFUNDS": np.nan},
-            index=common,
-        )
+        st.warning(f"⚠️ Could not fetch or align macro data from FRED: {e}")
 
 # Stress test data (2007+) reuses the already downloaded full history
 stress_prices = all_prices_no_irx.loc[
