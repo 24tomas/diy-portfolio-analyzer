@@ -52,7 +52,10 @@ except Exception:
 # Force Plotly figures to use app templates/colors instead of Streamlit's global theme.
 _ORIG_ST_PLOTLY_CHART = st.plotly_chart
 def _plotly_chart_no_streamlit_theme(*args, **kwargs):
-    kwargs.setdefault("theme", None)
+    # Keep Streamlit's native chart behaviour in dark mode,
+    # but use custom light-mode colors/template when dark mode is off.
+    dm = st.session_state.get("dark_mode", False)
+    kwargs.setdefault("theme", "streamlit" if dm else None)
     return _ORIG_ST_PLOTLY_CHART(*args, **kwargs)
 st.plotly_chart = _plotly_chart_no_streamlit_theme
 
@@ -150,7 +153,8 @@ p,li,label,span,[data-testid="stMarkdown"]{{color:{text}!important;}}
 [data-testid="stSidebar"] *{{color:{text}!important;}}
 [data-testid="stSidebarNav"]{{display:none!important;}}
 [data-testid="stSidebarHeader"]{{
-  min-height:0!important;padding:0!important;margin:0!important;}}
+  display:none!important;min-height:0!important;padding:0!important;margin:0!important;}}
+[data-testid="stSidebarHeader"] *{{display:none!important;}}
 [data-testid="stSidebarHeader"] a{{display:none!important;}}
 [data-testid="stSidebar"] h1,
 [data-testid="stSidebar"] h2,
