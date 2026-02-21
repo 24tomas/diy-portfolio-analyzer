@@ -579,6 +579,14 @@ sector_map   = st.session_state.get("sector_map", {})
 # ??????????????????????????????????????????????
 def annualized_return(r): return ((1 + r).prod() ** (252 / max(len(r), 1))) - 1
 def annualized_vol(r):    return r.std() * np.sqrt(252)
+
+def dynamic_sharpe(returns, rf_daily):
+    """Annualized Sharpe ratio using a daily risk-free rate Series."""
+    aligned_rf = rf_daily.reindex(returns.index).ffill().bfill()
+    excess = returns - aligned_rf
+    if len(excess) < 2 or excess.std() == 0:
+        return 0.0
+    return float(excess.mean() / excess.std() * np.sqrt(252))
 def max_drawdown(r):      c = (1 + r).cumprod(); return ((c - c.cummax()) / c.cummax()).min()
 
 st.subheader("Your Holdings")
@@ -602,7 +610,7 @@ ann_ret = annualized_return(port_ret)
 b_ann   = annualized_return(bench_ret)
 m1.metric("Ann. Return",     f"{ann_ret:.2%}")
 m2.metric("Ann. Volatility", f"{annualized_vol(port_ret):.2%}")
-m3.metric("Sharpe Ratio",    f"{qs.stats.sharpe(port_ret, rf=rf_series):.2f}")
+m3.metric("Sharpe Ratio",    f"{dynamic_sharpe(port_ret, rf_series):.2f}")
 m4.metric("Max Drawdown",    f"{max_drawdown(port_ret):.2%}")
 m5.metric("vs Benchmark",    f"{ann_ret - b_ann:+.2%}")
 
@@ -653,7 +661,7 @@ with tab_perf:
     qs_total  = qs.stats.comp(port_ret)
     qs_cagr   = qs.stats.cagr(port_ret)
     qs_vol    = qs.stats.volatility(port_ret)
-    qs_sharpe = qs.stats.sharpe(port_ret, rf=rf_series)
+    qs_sharpe = dynamic_sharpe(port_ret, rf_series)
     qs_info   = qs.stats.information_ratio(port_ret, bench_ret)
     b_total   = qs.stats.comp(bench_ret)
     b_cagr    = qs.stats.cagr(bench_ret)
@@ -678,7 +686,7 @@ with tab_perf:
         ("Total Return",    f"{qs.stats.comp(port_ret):.2%}",    f"{qs.stats.comp(bench_ret):.2%}"),
         ("CAGR",            f"{qs.stats.cagr(port_ret):.2%}",    f"{qs.stats.cagr(bench_ret):.2%}"),
         ("Ann. Volatility", f"{qs.stats.volatility(port_ret):.2%}", f"{qs.stats.volatility(bench_ret):.2%}"),
-        ("Sharpe",          f"{qs.stats.sharpe(port_ret, rf=rf_series):.2f}", f"{qs.stats.sharpe(bench_ret, rf=rf_series):.2f}"),
+        ("Sharpe",          f"{dynamic_sharpe(port_ret, rf_series):.2f}", f"{dynamic_sharpe(bench_ret, rf_series):.2f}"),
         ("Sortino",         f"{qs.stats.sortino(port_ret):.2f}",  f"{qs.stats.sortino(bench_ret):.2f}"),
         ("Calmar",          f"{qs.stats.calmar(port_ret):.2f}",   f"{qs.stats.calmar(bench_ret):.2f}"),
         ("Max Drawdown",    f"{qs.stats.max_drawdown(port_ret):.2%}", f"{qs.stats.max_drawdown(bench_ret):.2%}"),
@@ -701,7 +709,7 @@ with tab_perf:
                 "Total Return": lambda: f"{qs.stats.comp(comp_ret):.2%}",
                 "CAGR": lambda: f"{qs.stats.cagr(comp_ret):.2%}",
                 "Ann. Volatility": lambda: f"{qs.stats.volatility(comp_ret):.2%}",
-                "Sharpe": lambda: f"{qs.stats.sharpe(comp_ret, rf=rf_series):.2f}",
+                "Sharpe": lambda: f"{dynamic_sharpe(comp_ret, rf_series):.2f}",
                 "Sortino": lambda: f"{qs.stats.sortino(comp_ret):.2f}",
                 "Calmar": lambda: f"{qs.stats.calmar(comp_ret):.2f}",
                 "Max Drawdown": lambda: f"{qs.stats.max_drawdown(comp_ret):.2%}",
