@@ -844,6 +844,10 @@ def fetch_macro_data(start_date, end_date) -> pd.DataFrame:
     daily_idx = pd.date_range(start=macro.index.min(), end=end_ts, freq="D")
     macro_daily = macro.reindex(daily_idx).ffill()
     macro_daily.index.name = "Date"
+    try:
+        macro_daily.index = macro_daily.index.tz_localize(None)
+    except Exception:
+        pass
     return macro_daily
 
 
@@ -1357,7 +1361,14 @@ macro_df = pd.DataFrame(index=common, columns=["Inflation_YoY", "FEDFUNDS"], dty
 if len(common) > 0:
     try:
         macro_raw = fetch_macro_data(common.min().date(), common.max().date())
-        macro_df = macro_raw.reindex(common).ffill()
+        # Strip timezone from the yfinance index for safe merging with FRED naive dates
+        common_naive = common.tz_localize(None) if common.tz is not None else common
+
+        # Reindex using the naive dates, then assign the aligned values to our tz-aware DataFrame
+        aligned_raw = macro_raw.reindex(common_naive).ffill()
+        macro_df = pd.DataFrame(index=common)
+        macro_df["Inflation_YoY"] = aligned_raw["Inflation_YoY"].values
+        macro_df["FEDFUNDS"] = aligned_raw["FEDFUNDS"].values
     except Exception as e:
         st.warning(f"\u26a0\ufe0f Could not fetch macro data from FRED: {e}")
         macro_df = pd.DataFrame(
@@ -2921,7 +2932,14 @@ with tab_macro:
                 r_bench = bench_ret.loc[mask]
                 obs = int(mask.sum())
 
-                if len(r_port) >= 2 and len(r_bench) >= 2:
+                if obs == 0:
+                    p_ann_ret = np.nan
+                    p_ann_vol = np.nan
+                    p_mdd = np.nan
+                    b_ann_ret = np.nan
+                    b_ann_vol = np.nan
+                    b_mdd = np.nan
+                elif len(r_port) >= 2 and len(r_bench) >= 2:
                     p_ann_ret = annualized_return(r_port)
                     p_ann_vol = annualized_vol(r_port)
                     p_mdd = max_drawdown(r_port)
