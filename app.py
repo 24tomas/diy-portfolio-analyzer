@@ -1333,20 +1333,21 @@ if st.session_state["analysis_start_date"] < data_min or st.session_state["analy
 if st.session_state["analysis_end_date"] < data_min or st.session_state["analysis_end_date"] > data_max:
     st.session_state["analysis_end_date"] = data_max
 
-st.markdown("#### Analysis Date Window")
-d1, d2 = st.columns(2)
-analysis_start = d1.date_input(
-    "Analysis Start Date",
-    min_value=data_min,
-    max_value=data_max,
-    key="analysis_start_date",
-)
-analysis_end = d2.date_input(
-    "Analysis End Date",
-    min_value=data_min,
-    max_value=data_max,
-    key="analysis_end_date",
-)
+with st.sidebar:
+    st.divider()
+    st.markdown("### Analysis Date Window")
+    analysis_start = st.date_input(
+        "Analysis Start Date",
+        min_value=data_min,
+        max_value=data_max,
+        key="analysis_start_date",
+    )
+    analysis_end = st.date_input(
+        "Analysis End Date",
+        min_value=data_min,
+        max_value=data_max,
+        key="analysis_end_date",
+    )
 if analysis_end <= analysis_start:
     st.error("Analysis End Date must be after Analysis Start Date.")
     st.stop()
