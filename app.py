@@ -278,6 +278,7 @@ _apply_theme()
 # ──────────────────────────────────────────────
 PORTFOLIO_FILE = "saved_portfolios.json"
 STRESS_START_DATE = date(2007, 1, 1)
+DEFAULT_FETCH_START_DATE = date(1990, 1, 1)
 
 def load_saved_portfolios() -> dict:
     if os.path.exists(PORTFOLIO_FILE):
@@ -295,6 +296,8 @@ if "analysis_ready" not in st.session_state:
     st.session_state["analysis_ready"] = False
 if "input_mode" not in st.session_state:
     st.session_state["input_mode"] = "Shares"
+if "fetch_start_date" not in st.session_state:
+    st.session_state["fetch_start_date"] = DEFAULT_FETCH_START_DATE
 
 
 # ??????????????????????????????????????????????
@@ -534,6 +537,47 @@ with st.sidebar:
 
     st.divider()
 
+    # 3c. Analysis dates
+    st.header("\U0001F5D3\ufe0f Analysis Dates")
+    fetched_prices_sidebar = st.session_state.get("fetched_all_prices", pd.DataFrame())
+    if isinstance(fetched_prices_sidebar, pd.DataFrame) and not fetched_prices_sidebar.empty:
+        sidebar_data_min = fetched_prices_sidebar.index.min().date()
+        sidebar_data_max = fetched_prices_sidebar.index.max().date()
+        sidebar_default_start = max(sidebar_data_min, sidebar_data_max - timedelta(days=3 * 365))
+
+        if "analysis_start_date" not in st.session_state:
+            st.session_state["analysis_start_date"] = sidebar_default_start
+        if "analysis_end_date" not in st.session_state:
+            st.session_state["analysis_end_date"] = sidebar_data_max
+
+        if (
+            st.session_state["analysis_start_date"] < sidebar_data_min
+            or st.session_state["analysis_start_date"] > sidebar_data_max
+        ):
+            st.session_state["analysis_start_date"] = sidebar_default_start
+        if (
+            st.session_state["analysis_end_date"] < sidebar_data_min
+            or st.session_state["analysis_end_date"] > sidebar_data_max
+        ):
+            st.session_state["analysis_end_date"] = sidebar_data_max
+
+        st.date_input(
+            "Analysis Start Date",
+            min_value=sidebar_data_min,
+            max_value=sidebar_data_max,
+            key="analysis_start_date",
+        )
+        st.date_input(
+            "Analysis End Date",
+            min_value=sidebar_data_min,
+            max_value=sidebar_data_max,
+            key="analysis_end_date",
+        )
+    else:
+        st.caption("Fetch market data first to enable analysis date selection.")
+
+    st.divider()
+
     # ?? 3c. Compare with another portfolio ????????????
     st.header("\U0001F500 Compare Portfolios")
     compare_options = ["None (benchmark only)"] + portfolio_names
@@ -545,6 +589,14 @@ with st.sidebar:
 
     benchmark_ticker = st.text_input("Benchmark", value="SPY",
                                      help="Used for comparison in charts and factor analysis")
+
+    st.date_input(
+        "Data Fetch Start Date",
+        min_value=date(1970, 1, 1),
+        max_value=date.today(),
+        key="fetch_start_date",
+        help="How far back to download prices. Earlier dates allow longer backtests but can take longer to fetch.",
+    )
 
     use_dynamic_rf = st.checkbox(
         "Use Dynamic Risk-Free Rate (^IRX)", value=True,
@@ -1209,7 +1261,10 @@ if fetch_btn:
 
     all_tickers = tuple(sorted(all_tickers))
     fetch_end = date.today()
-    fetch_start = fetch_end - timedelta(days=15 * 365)
+    fetch_start = st.session_state.get("fetch_start_date", DEFAULT_FETCH_START_DATE)
+    if fetch_start >= fetch_end:
+        st.error("Data Fetch Start Date must be before today.")
+        st.stop()
 
     with st.spinner("Downloading data from Yahoo Finance..."):
         try:
@@ -1333,21 +1388,8 @@ if st.session_state["analysis_start_date"] < data_min or st.session_state["analy
 if st.session_state["analysis_end_date"] < data_min or st.session_state["analysis_end_date"] > data_max:
     st.session_state["analysis_end_date"] = data_max
 
-with st.sidebar:
-    st.divider()
-    st.markdown("### Analysis Date Window")
-    analysis_start = st.date_input(
-        "Analysis Start Date",
-        min_value=data_min,
-        max_value=data_max,
-        key="analysis_start_date",
-    )
-    analysis_end = st.date_input(
-        "Analysis End Date",
-        min_value=data_min,
-        max_value=data_max,
-        key="analysis_end_date",
-    )
+analysis_start = st.session_state["analysis_start_date"]
+analysis_end = st.session_state["analysis_end_date"]
 if analysis_end <= analysis_start:
     st.error("Analysis End Date must be after Analysis Start Date.")
     st.stop()
