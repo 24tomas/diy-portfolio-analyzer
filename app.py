@@ -21,12 +21,6 @@ import plotly.io as pio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 try:
-    from pandas_datareader import data as web
-    HAS_PDR = True
-except Exception:
-    web = None
-    HAS_PDR = False
-try:
     import pypfopt
     HAS_PYPFOPT = True
 except Exception:
@@ -818,31 +812,124 @@ def download_fama_french() -> pd.DataFrame:
 @st.cache_data(show_spinner="\U0001F30D Downloading macro data (FRED) \u2026", ttl=86400, persist="disk", max_entries=64)
 def fetch_macro_data(start_date, end_date) -> pd.DataFrame:
     """
-    Fetch macro series from FRED and align to daily frequency:
+    Fetch macro series from the official FRED API and align to daily frequency:
     - CPIAUCSL -> YoY inflation rate (%)
     - FEDFUNDS -> effective fed funds rate (%)
+    - T10Y2Y -> 10Y minus 2Y Treasury yield curve slope (%)
+    - BAMLH0A0HYM2 -> US High Yield OAS credit spread (%)
+    - SAHMREALTIME -> Sahm Rule recession indicator
+    - DFII10 -> 10Y real yield (%), forward-filled to handle sparse publication days
+    - Rate_Trend -> Tightening/Easing based on 6-month Fed Funds moving average
     """
-    if not HAS_PDR or web is None:
-        raise RuntimeError("pandas_datareader is not installed in this runtime.")
+    try:
+        from fredapi import Fred
+    except ImportError as exc:
+        raise ImportError(
+            "Missing dependency `fredapi`. Install it with `pip install fredapi`."
+        ) from exc
 
     start_ts = pd.Timestamp(start_date) - pd.Timedelta(days=400)
     end_ts = pd.Timestamp(end_date)
 
-    cpi = web.DataReader("CPIAUCSL", "fred", start_ts, end_ts)
-    fed = web.DataReader("FEDFUNDS", "fred", start_ts, end_ts)
+    try:
+        fred_api_key = st.secrets.get("FRED_API_KEY")
+    except Exception as exc:
+        raise ValueError(
+            "FRED API key is missing. Add `FRED_API_KEY = \"...\"` to `.streamlit/secrets.toml`."
+        ) from exc
 
-    macro = pd.concat([cpi, fed], axis=1).sort_index()
-    macro.columns = ["CPIAUCSL", "FEDFUNDS"]
-    macro = macro.apply(pd.to_numeric, errors="coerce").ffill()
-    macro["Inflation_YoY"] = macro["CPIAUCSL"].pct_change(12) * 100.0
-    macro = macro[["Inflation_YoY", "FEDFUNDS"]]
+    if not fred_api_key:
+        raise ValueError(
+            "FRED API key is missing. Add `FRED_API_KEY = \"...\"` to `.streamlit/secrets.toml`."
+        )
 
-    if macro.dropna(how="all").empty:
-        raise RuntimeError("FRED returned no usable macro data.")
+    try:
+        fred = Fred(api_key=fred_api_key)
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not initialize FRED client. Verify your API key and try again."
+        ) from exc
+
+    def _fetch_fred_series(series_id: str) -> pd.Series:
+        try:
+            series = fred.get_series(
+                series_id,
+                observation_start=start_ts.strftime("%Y-%m-%d"),
+                observation_end=end_ts.strftime("%Y-%m-%d"),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Unable to fetch `{series_id}` from FRED API. Check your API key and network connection."
+            ) from exc
+
+        if series is None or len(series) == 0:
+            raise RuntimeError(f"FRED API returned no usable rows for {series_id}.")
+
+        series = pd.Series(series, name=series_id)
+        series.index = pd.to_datetime(series.index, errors="coerce")
+        series = series[~series.index.isna()].sort_index()
+        series = pd.to_numeric(series, errors="coerce")
+        series.name = series_id
+        return series
+
+    cpi = _fetch_fred_series("CPIAUCSL")
+    fed = _fetch_fred_series("FEDFUNDS")
+    yield_curve = _fetch_fred_series("T10Y2Y")
+    credit_spread = _fetch_fred_series("BAMLH0A0HYM2")
+    sahm_rule = _fetch_fred_series("SAHMREALTIME")
+    real_yield_10y = _fetch_fred_series("DFII10")
+
+    # Compute YoY inflation on the raw monthly CPI series (12 months, not 12 days).
+    inflation_yoy = cpi.pct_change(12) * 100.0
+    inflation_yoy.name = "Inflation_YoY"
+
+    fed_ma6 = fed.rolling(window=6, min_periods=6).mean()
+    rate_trend = pd.Series(
+        np.where(fed > fed_ma6, "Tightening", "Easing"),
+        index=fed.index,
+        name="Rate_Trend",
+        dtype="object",
+    )
+    rate_trend = rate_trend.where(~(fed.isna() | fed_ma6.isna()))
+
+    macro = pd.concat(
+        [
+            inflation_yoy,
+            fed.rename("FEDFUNDS"),
+            yield_curve.rename("T10Y2Y"),
+            credit_spread.rename("BAMLH0A0HYM2"),
+            sahm_rule.rename("SAHMREALTIME"),
+            real_yield_10y.rename("DFII10"),
+            rate_trend,
+        ],
+        axis=1,
+    ).sort_index()
+    macro["Inflation_YoY"] = pd.to_numeric(macro["Inflation_YoY"], errors="coerce")
+    macro["FEDFUNDS"] = pd.to_numeric(macro["FEDFUNDS"], errors="coerce")
+    macro["T10Y2Y"] = pd.to_numeric(macro["T10Y2Y"], errors="coerce")
+    macro["BAMLH0A0HYM2"] = pd.to_numeric(macro["BAMLH0A0HYM2"], errors="coerce")
+    macro["SAHMREALTIME"] = pd.to_numeric(macro["SAHMREALTIME"], errors="coerce")
+    macro["DFII10"] = pd.to_numeric(macro["DFII10"], errors="coerce")
+    macro["Rate_Trend"] = macro["Rate_Trend"].astype("object")
+    numeric_cols = [
+        "Inflation_YoY",
+        "FEDFUNDS",
+        "T10Y2Y",
+        "BAMLH0A0HYM2",
+        "SAHMREALTIME",
+        "DFII10",
+    ]
+    macro[numeric_cols] = macro[numeric_cols].ffill()
+    macro["Rate_Trend"] = macro["Rate_Trend"].ffill()
+
+    if macro[numeric_cols].dropna(how="all").empty:
+        raise RuntimeError("FRED API returned no usable macro data.")
 
     # FRED is typically monthly; forward-fill to daily for return alignment.
     daily_idx = pd.date_range(start=macro.index.min(), end=end_ts, freq="D")
-    macro_daily = macro.reindex(daily_idx).ffill()
+    macro_daily = macro.reindex(daily_idx)
+    macro_daily[numeric_cols] = macro_daily[numeric_cols].ffill()
+    macro_daily["Rate_Trend"] = macro_daily["Rate_Trend"].ffill()
     macro_daily.index.name = "Date"
     try:
         macro_daily.index = macro_daily.index.tz_localize(None)
@@ -1357,7 +1444,14 @@ else:
     rf_series = pd.Series(static_rf_daily, index=common, name="RF_daily")
 
 # Macro data from FRED aligned to daily portfolio/benchmark dates.
-macro_df = pd.DataFrame(index=common, columns=["Inflation_YoY", "FEDFUNDS"], dtype=float)
+macro_df = pd.DataFrame(index=common)
+macro_df["Inflation_YoY"] = np.nan
+macro_df["FEDFUNDS"] = np.nan
+macro_df["T10Y2Y"] = np.nan
+macro_df["BAMLH0A0HYM2"] = np.nan
+macro_df["SAHMREALTIME"] = np.nan
+macro_df["DFII10"] = np.nan
+macro_df["Rate_Trend"] = pd.Series(index=common, dtype="object")
 if len(common) > 0:
     try:
         macro_raw = fetch_macro_data(common.min().date(), common.max().date())
@@ -1372,11 +1466,21 @@ if len(common) > 0:
         # Merge left to keep exactly the 'common' dates, then forward-fill any missing weekends
         merged = temp_common.merge(temp_macro, on="pure_date", how="left").set_index(common)
         
-        # Backfill first, then forward fill to ensure no NaNs at the very start of the series
-        merged = merged.bfill().ffill() 
+        # Forward-fill first (no look-ahead leakage), then backfill only remaining early-edge NaNs.
+        merged = merged.ffill().bfill() 
         
         macro_df["Inflation_YoY"] = merged["Inflation_YoY"]
         macro_df["FEDFUNDS"] = merged["FEDFUNDS"]
+        if "T10Y2Y" in merged.columns:
+            macro_df["T10Y2Y"] = merged["T10Y2Y"]
+        if "BAMLH0A0HYM2" in merged.columns:
+            macro_df["BAMLH0A0HYM2"] = merged["BAMLH0A0HYM2"]
+        if "SAHMREALTIME" in merged.columns:
+            macro_df["SAHMREALTIME"] = merged["SAHMREALTIME"]
+        if "DFII10" in merged.columns:
+            macro_df["DFII10"] = merged["DFII10"]
+        if "Rate_Trend" in merged.columns:
+            macro_df["Rate_Trend"] = merged["Rate_Trend"]
         
     except Exception as e:
         st.warning(f"⚠️ Could not fetch or align macro data from FRED: {e}")
@@ -1926,14 +2030,31 @@ with tab_risk:
 
     # Also show correlation
     st.subheader("Asset Correlation Matrix")
-    corr = ind_ret[valid_tickers].corr()
+    corr_source = ind_ret[valid_tickers].copy()
+    macro_corr_factors = ["Inflation_YoY", "T10Y2Y", "DFII10"]
+    available_macro_corr = []
+    if isinstance(macro_df, pd.DataFrame) and not macro_df.empty:
+        available_macro_corr = [c for c in macro_corr_factors if c in macro_df.columns]
+        if available_macro_corr:
+            macro_for_corr = macro_df.reindex(corr_source.index)[available_macro_corr].copy()
+            for c in available_macro_corr:
+                macro_for_corr[c] = pd.to_numeric(macro_for_corr[c], errors="coerce")
+            macro_for_corr = macro_for_corr.ffill().bfill()
+            corr_source = pd.concat([corr_source, macro_for_corr], axis=1)
+    if available_macro_corr:
+        st.caption(
+            "Correlation matrix includes macro factors: "
+            + ", ".join(available_macro_corr)
+        )
+    corr = corr_source.corr()
+    show_corr_text = len(corr.columns) <= 15
     fig_corr = go.Figure(data=go.Heatmap(
         z=corr.values, x=corr.columns, y=corr.index,
         colorscale="RdBu_r", zmid=0,
-        text=(np.round(corr.values, 2) if not many_tickers else None),
-        texttemplate=("%{text}" if not many_tickers else None),
+        text=(np.round(corr.values, 2) if show_corr_text else None),
+        texttemplate=("%{text}" if show_corr_text else None),
         zmin=-1, zmax=1))
-    fig_corr.update_layout(height=max(400, len(valid_tickers) * 20),
+    fig_corr.update_layout(height=max(400, len(corr.columns) * 24),
                            margin=dict(l=40, r=20, t=20, b=40))
     st.plotly_chart(fig_corr, width='stretch')
 
@@ -2904,120 +3025,402 @@ with tab_stress:
 with tab_macro:
     st.subheader("Macro Regime Analysis")
     st.caption(
-        "Evaluates portfolio and benchmark behavior across inflation and policy-rate "
-        "environments using FRED CPI and Fed Funds data."
+        "Institutional macro dashboard: Investment Clock trajectory, yield-curve and "
+        "credit stress signals, and portfolio behavior under tightening conditions."
     )
 
     if macro_df is None or macro_df.empty:
         st.info("Macro data is unavailable for this analysis window.")
     else:
-        macro_aligned = macro_df.reindex(port_ret.index).ffill()
+        macro_aligned = macro_df.reindex(port_ret.index).copy()
         if macro_aligned.empty:
             st.info("Macro data is unavailable for this analysis window.")
         else:
-            inflation_yoy = pd.to_numeric(macro_aligned.get("Inflation_YoY"), errors="coerce")
-            fedfunds = pd.to_numeric(macro_aligned.get("FEDFUNDS"), errors="coerce")
-            fedfunds_60d = fedfunds.shift(60)
+            for col in [
+                "Inflation_YoY",
+                "FEDFUNDS",
+                "T10Y2Y",
+                "BAMLH0A0HYM2",
+                "SAHMREALTIME",
+                "DFII10",
+            ]:
+                macro_aligned[col] = pd.to_numeric(
+                    macro_aligned.get(col, pd.Series(index=macro_aligned.index, dtype=float)),
+                    errors="coerce",
+                )
+                macro_aligned[col] = macro_aligned[col].ffill().bfill()
 
-            regime_masks = {
-                "High Inflation": inflation_yoy > 3.0,
-                "Low/Normal Inflation": inflation_yoy <= 3.0,
-                "Rising Rates": fedfunds > fedfunds_60d,
-                "Falling/Flat Rates": fedfunds <= fedfunds_60d,
+            macro_aligned["Rate_Trend"] = macro_aligned.get(
+                "Rate_Trend",
+                pd.Series(index=macro_aligned.index, dtype="object"),
+            )
+            macro_aligned["Rate_Trend"] = macro_aligned["Rate_Trend"].ffill().bfill()
+
+            infl_high = macro_aligned["Inflation_YoY"] > 3.0
+            infl_low = macro_aligned["Inflation_YoY"] <= 3.0
+            tight = macro_aligned["Rate_Trend"] == "Tightening"
+            easing = macro_aligned["Rate_Trend"] == "Easing"
+
+            quadrant_order = [
+                "Quadrant 1 (Stagflation/Tightening)",
+                "Quadrant 2 (Goldilocks/Boom)",
+                "Quadrant 3 (Disinflation/Easing)",
+                "Quadrant 4 (Inflationary Easing)",
+            ]
+            macro_aligned["Quadrant"] = np.select(
+                [
+                    infl_high & tight,
+                    infl_low & tight,
+                    infl_low & easing,
+                    infl_high & easing,
+                ],
+                quadrant_order,
+                default="Unclassified",
+            )
+
+            st.markdown("**Macro Health Check**")
+            health_df = macro_aligned[
+                [
+                    "Inflation_YoY",
+                    "FEDFUNDS",
+                    "T10Y2Y",
+                    "BAMLH0A0HYM2",
+                    "SAHMREALTIME",
+                    "DFII10",
+                    "Rate_Trend",
+                ]
+            ].dropna(how="all")
+            if health_df.empty:
+                st.info("Insufficient macro observations to compute health-check metrics.")
+            else:
+                latest_health = health_df.iloc[-1]
+                infl_monthly = health_df["Inflation_YoY"].resample("ME").last().dropna()
+                infl_delta = (
+                    infl_monthly.iloc[-1] - infl_monthly.iloc[-2]
+                    if len(infl_monthly) >= 2
+                    else np.nan
+                )
+
+                inflation_val = latest_health.get("Inflation_YoY", np.nan)
+                yield_curve_val = latest_health.get("T10Y2Y", np.nan)
+                credit_val = latest_health.get("BAMLH0A0HYM2", np.nan)
+                fed_val = latest_health.get("FEDFUNDS", np.nan)
+                sahm_val = latest_health.get("SAHMREALTIME", np.nan)
+
+                m1, m2, m3, m4, m5 = st.columns(5)
+                with m1:
+                    st.metric(
+                        "Inflation Regime (YoY CPI)",
+                        "N/A" if pd.isna(inflation_val) else f"{inflation_val:.2f}%",
+                        delta=(
+                            None
+                            if pd.isna(infl_delta)
+                            else f"{infl_delta:+.2f} pp vs last month"
+                        ),
+                    )
+                    if pd.notna(inflation_val):
+                        st.caption(
+                            "High Inflation" if inflation_val > 3.0 else "Low/Normal Inflation"
+                        )
+
+                with m2:
+                    st.metric(
+                        "Yield Curve (10Y-2Y)",
+                        "N/A" if pd.isna(yield_curve_val) else f"{yield_curve_val:.2f}%",
+                    )
+                    if pd.notna(yield_curve_val):
+                        yc_label = (
+                            "INVERTED (Recession Signal)"
+                            if yield_curve_val < 0
+                            else "Normal/Positive Slope"
+                        )
+                        yc_color = "#EF4444" if yield_curve_val < 0 else "#22C55E"
+                        st.markdown(
+                            f"<span style='color:{yc_color} !important;font-weight:600'>{yc_label}</span>",
+                            unsafe_allow_html=True,
+                        )
+
+                with m3:
+                    st.metric(
+                        "Credit Conditions (HY OAS)",
+                        "N/A" if pd.isna(credit_val) else f"{credit_val:.2f}%",
+                    )
+                    if pd.notna(credit_val):
+                        if credit_val > 5.0:
+                            cr_label, cr_color = "Stress/Tight", "#EF4444"
+                        elif credit_val < 3.5:
+                            cr_label, cr_color = "Loose/Risk-On", "#22C55E"
+                        else:
+                            cr_label, cr_color = "Neutral", "#F59E0B"
+                        st.markdown(
+                            f"<span style='color:{cr_color} !important;font-weight:600'>{cr_label}</span>",
+                            unsafe_allow_html=True,
+                        )
+
+                with m4:
+                    st.metric(
+                        "Fed Policy (Fed Funds)",
+                        "N/A" if pd.isna(fed_val) else f"{fed_val:.2f}%",
+                    )
+                    fed_state = latest_health.get("Rate_Trend")
+                    if isinstance(fed_state, str) and fed_state:
+                        st.caption(f"Policy Trend: {fed_state}")
+
+                with m5:
+                    st.metric(
+                        "Recession Risk (Sahm Rule)",
+                        "N/A" if pd.isna(sahm_val) else f"{sahm_val:.2f}",
+                    )
+                    if pd.notna(sahm_val):
+                        if sahm_val >= 0.50:
+                            sahm_label, sahm_color = "RECESSION SIGNAL", "#EF4444"
+                        elif sahm_val >= 0.20:
+                            sahm_label, sahm_color = "Watch", "#F59E0B"
+                        else:
+                            sahm_label, sahm_color = "Low Risk", "#22C55E"
+                        st.markdown(
+                            f"<span style='color:{sahm_color} !important;font-weight:700'>{sahm_label}</span>",
+                            unsafe_allow_html=True,
+                        )
+
+            st.markdown("**Investment Clock Worm Chart (Last 12 Months)**")
+            worm_cols = [
+                "FEDFUNDS",
+                "Inflation_YoY",
+                "Quadrant",
+                "Rate_Trend",
+                "T10Y2Y",
+                "BAMLH0A0HYM2",
+                "SAHMREALTIME",
+                "DFII10",
+            ]
+            worm_df = (
+                macro_aligned[worm_cols]
+                .resample("ME")
+                .last()
+                .dropna(subset=["FEDFUNDS", "Inflation_YoY"])
+                .tail(12)
+            )
+
+            if len(worm_df) < 2:
+                st.info("Insufficient monthly macro observations to render a 12-month trajectory.")
+            else:
+                fig_worm = go.Figure()
+                steps = max(len(worm_df) - 1, 1)
+
+                # Draw line segments with increasing opacity so recent path points are brighter.
+                for i in range(1, len(worm_df)):
+                    alpha = 0.20 + 0.80 * (i / steps)
+                    fig_worm.add_trace(
+                        go.Scatter(
+                            x=worm_df["FEDFUNDS"].iloc[i - 1:i + 1],
+                            y=worm_df["Inflation_YoY"].iloc[i - 1:i + 1],
+                            mode="lines",
+                            line=dict(color=f"rgba(99,110,250,{alpha:.3f})", width=4),
+                            showlegend=False,
+                            hoverinfo="skip",
+                        )
+                    )
+
+                point_alphas = [
+                    0.20 + 0.80 * (i / max(len(worm_df) - 1, 1))
+                    for i in range(len(worm_df))
+                ]
+                point_colors = [f"rgba(99,110,250,{a:.3f})" for a in point_alphas]
+                hover_text = [
+                    (
+                        f"Month: {idx.strftime('%Y-%m')}<br>"
+                        f"Quadrant: {row['Quadrant']}<br>"
+                        f"Rate Trend: {row['Rate_Trend']}<br>"
+                        f"Yield Curve: {row['T10Y2Y']:.2f}%<br>"
+                        f"Credit Spread: {row['BAMLH0A0HYM2']:.2f}%<br>"
+                        f"Real Yield (10Y): {row['DFII10']:.2f}%<br>"
+                        f"Sahm Rule: {row['SAHMREALTIME']:.2f}"
+                    )
+                    for idx, row in worm_df.iterrows()
+                ]
+                fig_worm.add_trace(
+                    go.Scatter(
+                        x=worm_df["FEDFUNDS"],
+                        y=worm_df["Inflation_YoY"],
+                        mode="markers",
+                        name="Last 12 Months Path",
+                        marker=dict(
+                            size=10,
+                            color=point_colors,
+                            line=dict(color="#D0D0D0", width=0.5),
+                        ),
+                        text=hover_text,
+                        hovertemplate=(
+                            "%{text}<br>"
+                            "Fed Funds: %{x:.2f}%<br>"
+                            "Inflation YoY: %{y:.2f}%<extra></extra>"
+                        ),
+                    )
+                )
+
+                latest_point = worm_df.iloc[-1]
+                latest_date = worm_df.index[-1].date().isoformat()
+                fig_worm.add_trace(
+                    go.Scatter(
+                        x=[latest_point["FEDFUNDS"]],
+                        y=[latest_point["Inflation_YoY"]],
+                        mode="markers+text",
+                        text=[f"Current Position ({latest_date})"],
+                        textposition="top center",
+                        marker=dict(
+                            size=19,
+                            symbol="star",
+                            color="#FFFFFF",
+                            line=dict(color="#111111", width=1.8),
+                        ),
+                        name="Current Position",
+                        hovertemplate=(
+                            f"Date: {latest_date}<br>"
+                            "Fed Funds: %{x:.2f}%<br>"
+                            "Inflation YoY: %{y:.2f}%<extra></extra>"
+                        ),
+                    )
+                )
+                fig_worm.add_hline(y=3.0, line_dash="dash", line_color="#888")
+                fig_worm.update_layout(
+                    legend=dict(orientation="h", y=1.02, x=0),
+                    margin=dict(l=40, r=20, t=30, b=40),
+                    xaxis_title="Fed Funds Rate (%)",
+                    yaxis_title="YoY Inflation (%)",
+                    height=500,
+                )
+                st.plotly_chart(fig_worm, width='stretch')
+
+            st.markdown("**Valuation Gravity: Portfolio vs. Real Yields**")
+            real_yield = pd.to_numeric(macro_aligned.get("DFII10"), errors="coerce")
+            real_yield = real_yield.reindex(port_ret.index).ffill()
+            rolling_12m_ret = (1.0 + port_ret).rolling(252).apply(np.prod, raw=True) - 1.0
+            valuation_df = pd.DataFrame(
+                {
+                    "DFII10": real_yield,
+                    "Portfolio_12M": rolling_12m_ret,
+                },
+                index=port_ret.index,
+            ).dropna()
+
+            if valuation_df.empty:
+                st.info("Insufficient overlap between real-yield and portfolio history for valuation-gravity analysis.")
+            else:
+                fig_val = go.Figure()
+                fig_val.add_trace(
+                    go.Scatter(
+                        x=valuation_df.index,
+                        y=valuation_df["DFII10"],
+                        mode="lines",
+                        name="10Y Real Yield (DFII10)",
+                        line=dict(color="#A855F7", width=2.5),
+                        yaxis="y",
+                        hovertemplate="%{x|%Y-%m-%d}<br>10Y Real Yield: %{y:.2f}%<extra></extra>",
+                    )
+                )
+                fig_val.add_trace(
+                    go.Scatter(
+                        x=valuation_df.index,
+                        y=valuation_df["Portfolio_12M"],
+                        mode="lines",
+                        name="Portfolio Rolling 12M Return",
+                        line=dict(color="#22C55E", width=2),
+                        yaxis="y2",
+                        hovertemplate="%{x|%Y-%m-%d}<br>Rolling 12M Return: %{y:.2%}<extra></extra>",
+                    )
+                )
+                fig_val.update_layout(
+                    xaxis=dict(title="Date"),
+                    yaxis=dict(
+                        title="10Y Real Yield (%)",
+                        autorange="reversed",
+                    ),
+                    yaxis2=dict(
+                        title="Portfolio Rolling 12M Return",
+                        overlaying="y",
+                        side="right",
+                        tickformat=".1%",
+                    ),
+                    legend=dict(orientation="h", y=1.02, x=0),
+                    margin=dict(l=50, r=60, t=30, b=40),
+                    height=460,
+                    hovermode="x unified",
+                )
+                st.plotly_chart(fig_val, width='stretch')
+                st.caption(
+                    "Left axis is inverted: rising real yields (higher cost of capital) move downward "
+                    "to visually highlight valuation pressure on long-duration assets."
+                )
+
+            st.markdown("**Portfolio Behavior During Stress Signals**")
+            stress_conditions = {
+                "Yield Curve Inversion (T10Y2Y < 0)": macro_aligned["T10Y2Y"] < 0.0,
+                "Credit Stress (HY OAS > 5.0%)": macro_aligned["BAMLH0A0HYM2"] > 5.0,
+                "Quantitative Tightening (Fed Trend = Tightening)": macro_aligned["Rate_Trend"] == "Tightening",
             }
+            stress_rows = []
+            for signal_name, mask in stress_conditions.items():
+                mask = mask.fillna(False).reindex(port_ret.index, fill_value=False)
+                r_port = port_ret.loc[mask].dropna()
 
-            regime_rows = []
-            regime_labels = []
-            regime_port_returns = []
-            regime_bench_returns = []
-
-            for regime_name, mask in regime_masks.items():
-                mask = mask.fillna(False)
-                r_port = port_ret.loc[mask]
-                r_bench = bench_ret.loc[mask]
-                obs = int(mask.sum())
-
-                if obs == 0:
-                    p_ann_ret = np.nan
-                    p_ann_vol = np.nan
-                    p_mdd = np.nan
-                    b_ann_ret = np.nan
-                    b_ann_vol = np.nan
-                    b_mdd = np.nan
-                elif len(r_port) >= 2 and len(r_bench) >= 2:
-                    p_ann_ret = annualized_return(r_port)
-                    p_ann_vol = annualized_vol(r_port)
-                    p_mdd = max_drawdown(r_port)
-
-                    b_ann_ret = annualized_return(r_bench)
-                    b_ann_vol = annualized_vol(r_bench)
-                    b_mdd = max_drawdown(r_bench)
-                else:
-                    p_ann_ret = np.nan
-                    p_ann_vol = np.nan
-                    p_mdd = np.nan
-                    b_ann_ret = np.nan
-                    b_ann_vol = np.nan
-                    b_mdd = np.nan
-
-                regime_rows.append(
+                stress_rows.append(
                     {
-                        "Regime": regime_name,
-                        "Observations": obs,
-                        "Portfolio Ann. Return": p_ann_ret,
-                        "Portfolio Ann. Volatility": p_ann_vol,
-                        "Portfolio Max Drawdown": p_mdd,
-                        f"Benchmark ({bench}) Ann. Return": b_ann_ret,
-                        f"Benchmark ({bench}) Ann. Volatility": b_ann_vol,
-                        f"Benchmark ({bench}) Max Drawdown": b_mdd,
+                        "Stress Signal": signal_name,
+                        "Observations": int(len(r_port)),
+                        "Avg Annualized Return": annualized_return(r_port) if len(r_port) >= 2 else np.nan,
+                        "Max Drawdown": max_drawdown(r_port) if len(r_port) >= 2 else np.nan,
                     }
                 )
-                regime_labels.append(regime_name)
-                regime_port_returns.append(p_ann_ret)
-                regime_bench_returns.append(b_ann_ret)
 
-            regime_df = pd.DataFrame(regime_rows)
-            pct_cols = [
-                "Portfolio Ann. Return",
-                "Portfolio Ann. Volatility",
-                "Portfolio Max Drawdown",
-                f"Benchmark ({bench}) Ann. Return",
-                f"Benchmark ({bench}) Ann. Volatility",
-                f"Benchmark ({bench}) Max Drawdown",
-            ]
-            fmt_map = {col: (lambda v: "N/A" if pd.isna(v) else f"{v:.2%}") for col in pct_cols}
-            regime_styled = regime_df.style.format(fmt_map)
-            st.dataframe(regime_styled, width='stretch', hide_index=True)
+            stress_df = pd.DataFrame(stress_rows)
+            stress_fmt = {
+                "Avg Annualized Return": lambda v: "N/A" if pd.isna(v) else f"{v:.2%}",
+                "Max Drawdown": lambda v: "N/A" if pd.isna(v) else f"{v:.2%}",
+            }
+            st.dataframe(stress_df.style.format(stress_fmt), width='stretch', hide_index=True)
 
-            fig_regime = go.Figure()
-            fig_regime.add_trace(
-                go.Bar(
-                    x=regime_labels,
-                    y=regime_port_returns,
-                    name="Portfolio",
-                    marker_color="#636EFA",
-                    hovertemplate="<b>%{x}</b><br>Portfolio Ann. Return: %{y:.2%}<extra></extra>",
+            st.markdown("**Performance By Investment Clock Quadrant**")
+            perf_source = pd.DataFrame(
+                {
+                    "Quadrant": macro_aligned["Quadrant"],
+                    "Portfolio": port_ret,
+                    f"Benchmark ({bench})": bench_ret,
+                },
+                index=port_ret.index,
+            )
+
+            perf_rows = []
+            bench_col = f"Benchmark ({bench})"
+            for quadrant in quadrant_order:
+                q_slice = perf_source.loc[perf_source["Quadrant"] == quadrant]
+                r_port = q_slice["Portfolio"].dropna()
+                r_bench = q_slice[bench_col].dropna()
+
+                p_ann_ret = annualized_return(r_port) if len(r_port) >= 2 else np.nan
+                b_ann_ret = annualized_return(r_bench) if len(r_bench) >= 2 else np.nan
+                p_win = (r_port > 0).mean() if len(r_port) > 0 else np.nan
+                b_win = (r_bench > 0).mean() if len(r_bench) > 0 else np.nan
+
+                perf_rows.append(
+                    {
+                        "Quadrant": quadrant,
+                        "Observations": int(len(q_slice)),
+                        "Portfolio Ann. Return": p_ann_ret,
+                        "Portfolio Win Rate": p_win,
+                        f"{bench_col} Ann. Return": b_ann_ret,
+                        f"{bench_col} Win Rate": b_win,
+                    }
                 )
-            )
-            fig_regime.add_trace(
-                go.Bar(
-                    x=regime_labels,
-                    y=regime_bench_returns,
-                    name=f"Benchmark ({bench})",
-                    marker_color="#EF553B",
-                    hovertemplate=f"<b>%{{x}}</b><br>Benchmark ({bench}) Ann. Return: %{{y:.2%}}<extra></extra>",
-                )
-            )
-            fig_regime.update_layout(
-                barmode="group",
-                xaxis_title="Macro Regime",
-                yaxis_title="Annualized Return",
-                yaxis_tickformat=".1%",
-                legend=dict(orientation="h", y=1.02, x=0),
-                margin=dict(l=40, r=20, t=30, b=40),
-                height=420,
-            )
-            st.plotly_chart(fig_regime, width='stretch')
+
+            perf_df = pd.DataFrame(perf_rows)
+            fmt_map = {
+                "Portfolio Ann. Return": lambda v: "N/A" if pd.isna(v) else f"{v:.2%}",
+                "Portfolio Win Rate": lambda v: "N/A" if pd.isna(v) else f"{v:.1%}",
+                f"{bench_col} Ann. Return": lambda v: "N/A" if pd.isna(v) else f"{v:.2%}",
+                f"{bench_col} Win Rate": lambda v: "N/A" if pd.isna(v) else f"{v:.1%}",
+            }
+            st.dataframe(perf_df.style.format(fmt_map), width='stretch', hide_index=True)
 
 
 # ==================== TAB 7 - OPTIMIZATION ====================

@@ -8,3 +8,4 @@ PyPortfolioOpt
 scipy
 statsmodels
 scikit-learn
+fredapi
